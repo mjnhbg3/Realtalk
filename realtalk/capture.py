@@ -276,33 +276,27 @@ class VoiceCapture:
                 await asyncio.sleep(0.1)
 
     async def _process_user_audio(self, user_id: int, current_time: float):
-        """Process audio for a specific user."""
+        """Update speaking state without consuming buffered audio."""
         if user_id not in self.audio_buffer:
             return
 
         audio_chunks = self.audio_buffer[user_id]
         last_activity = self.last_audio_time.get(user_id, 0)
 
-        # Check for silence timeout
+        # If we have buffered audio, refresh activity and mark speaking
+        if audio_chunks:
+            self.last_audio_time[user_id] = current_time
+            if user_id not in self.speaking_users:
+                self.speaking_users.add(user_id)
+                log.debug(f"User {user_id} started speaking")
+            # Do not consume chunks here; mixing stage will process them
+            return
+
+        # No chunks: check for silence timeout to mark stop speaking
         if current_time - last_activity > (self.silence_threshold / 1000.0):
             if user_id in self.speaking_users:
                 self.speaking_users.discard(user_id)
                 log.debug(f"User {user_id} stopped speaking (silence timeout)")
-
-            # Clear old audio chunks to prevent memory buildup
-            if len(audio_chunks) > 100:  # Keep only recent chunks
-                audio_chunks = audio_chunks[-50:]
-                self.audio_buffer[user_id] = audio_chunks
-
-        # Process available audio chunks
-        if audio_chunks:
-            processed_audio = self._process_audio_chunks(chunks=audio_chunks, user_id=user_id)
-            if processed_audio:
-                # Update activity time
-                self.last_audio_time[user_id] = current_time
-                if user_id not in self.speaking_users:
-                    self.speaking_users.add(user_id)
-                    log.debug(f"User {user_id} started speaking")
 
     def _process_audio_chunks(self, chunks: List[bytes], user_id: int) -> Optional[bytes]:
         """Process raw audio chunks with noise filtering and conversion."""
@@ -529,6 +523,11 @@ class VoiceCapture:
 
         # Add audio data
         self.audio_buffer[user_id].append(audio_data)
+
+        # Update speaking state and last activity
+        now = time.time()
+        self.last_audio_time[user_id] = now
+        self.speaking_users.add(user_id)
 
         # Prevent memory buildup
         if len(self.audio_buffer[user_id]) > 200:  # ~4 seconds at 50fps

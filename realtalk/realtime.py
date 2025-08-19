@@ -205,6 +205,10 @@ class RealtimeClient:
                 "audio": audio_b64
             }
             await self._send_message(message)
+            try:
+                log.debug(f"Queued audio chunk to API: {len(audio_data)} bytes")
+            except Exception:
+                pass
             
         except Exception as e:
             log.error(f"Error sending audio chunk: {e}")
