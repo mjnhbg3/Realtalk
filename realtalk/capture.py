@@ -186,10 +186,16 @@ class VoiceCapture:
             # Create custom audio sink for better control
             self.sink = EnhancedAudioSink(self)
 
-            # Start recording (API provided by discord-ext-voice-recv)
-            self.voice_client.start_recording(
-                self.sink, self._recording_finished_callback, sync_start=False
-            )
+            # Begin receiving audio using discord-ext-voice-recv API
+            # VoiceRecvClient exposes `listen(sink, *, after=None)` instead of pycord's start_recording
+            if not hasattr(self.voice_client, "listen"):
+                raise RuntimeError(
+                    "Connected voice client does not support listen(). "
+                    "Ensure you connect with cls=voice_recv.VoiceRecvClient."
+                )
+
+            # Start receiving; sink.cleanup() will be called when stopped by the client
+            self.voice_client.listen(self.sink)
 
             self.is_recording = True
 
@@ -208,9 +214,13 @@ class VoiceCapture:
         self.is_recording = False
 
         try:
-            # Stop recording
-            if self.voice_client and hasattr(self.voice_client, "stop_recording"):
-                self.voice_client.stop_recording()
+            # Stop receiving
+            if self.voice_client:
+                if hasattr(self.voice_client, "stop_listening"):
+                    self.voice_client.stop_listening()
+                elif hasattr(self.voice_client, "stop"):
+                    # Fallback: stop both send/recv if specific call is unavailable
+                    self.voice_client.stop()
 
             # Cancel processing task
             if self.capture_task and not self.capture_task.done():
@@ -594,4 +604,3 @@ else:
                 "EnhancedAudioSink requires discord-ext-voice-recv. "
                 "Install it with: pip install \"git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git\""
             )
-

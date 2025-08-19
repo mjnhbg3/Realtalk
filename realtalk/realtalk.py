@@ -19,7 +19,7 @@ from redbot.core.utils.chat_formatting import box, humanize_list
 
 from .realtime import RealtimeClient
 from .capture import VoiceCapture
-from .audio import PCMQueueAudioSource
+from .audio import PCMQueueAudioSource, load_opus_lib
 
 log = logging.getLogger("red.realtalk")
 
@@ -489,12 +489,41 @@ class RealTalk(red_commands.Cog):
             
             try:
                 log.info(f"Voice connection attempt {attempt + 1}/{max_attempts} for guild {guild_id}")
+
+                # Ensure Opus is available for voice decoding/encoding
+                try:
+                    load_opus_lib()
+                except Exception:
+                    pass
                 
-                # Try to connect
-                voice_client = await channel.connect(
-                    timeout=await self.config.voice_timeout(),
-                    reconnect=True
-                )
+                # For 4006 errors, we need to ensure any existing voice client is fully disconnected
+                # before attempting a new connection
+                existing_client = ctx.guild.voice_client
+                if existing_client:
+                    try:
+                        await existing_client.disconnect(force=True)
+                        # Give Discord time to clean up the connection
+                        await asyncio.sleep(0.5)
+                    except Exception as cleanup_error:
+                        log.debug(f"Error cleaning up existing voice client: {cleanup_error}")
+                
+                # Import voice receive extension and use its client to enable capture
+                try:
+                    voice_recv_module = __import__('voice_recv')
+                    recv_cls = getattr(voice_recv_module, 'VoiceRecvClient', None)
+                except Exception:
+                    recv_cls = None
+
+                # Try to connect with a fresh connection, using VoiceRecvClient if available
+                connect_kwargs = {
+                    'timeout': await self.config.voice_timeout(),
+                    'reconnect': False,
+                }
+
+                if recv_cls is not None:
+                    voice_client = await channel.connect(cls=recv_cls, **connect_kwargs)
+                else:
+                    voice_client = await channel.connect(**connect_kwargs)
                 
                 if voice_client and voice_client.is_connected():
                     log.info(f"Voice connection successful for guild {guild_id}")
@@ -505,9 +534,17 @@ class RealTalk(red_commands.Cog):
                 log.warning(f"Voice connection closed (attempt {attempt + 1}): {e}")
                 if e.code == 4006:
                     # Session no longer valid - this is the common Discord infrastructure issue
+                    # Force cleanup any existing connection state
+                    existing_client = ctx.guild.voice_client
+                    if existing_client:
+                        try:
+                            await existing_client.disconnect(force=True)
+                        except Exception:
+                            pass
+                    
                     if attempt < max_attempts - 1:
                         delay = base_delay * (2 ** attempt)  # Exponential backoff
-                        log.info(f"Retrying in {delay}s due to 4006 error...")
+                        log.info(f"Retrying in {delay}s due to 4006 error (session invalidated)...")
                         await asyncio.sleep(delay)
                         continue
                 else:
@@ -516,6 +553,14 @@ class RealTalk(red_commands.Cog):
                     
             except Exception as e:
                 log.error(f"Voice connection error (attempt {attempt + 1}): {e}")
+                # Clean up any partial connection state
+                existing_client = ctx.guild.voice_client
+                if existing_client:
+                    try:
+                        await existing_client.disconnect(force=True)
+                    except Exception:
+                        pass
+                        
                 if attempt < max_attempts - 1:
                     delay = base_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
