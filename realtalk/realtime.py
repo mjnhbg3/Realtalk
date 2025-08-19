@@ -11,8 +11,16 @@ import logging
 import time
 import base64
 from typing import Optional, Callable, Dict, Any
-import websockets
-import websockets.exceptions
+
+try:
+    import websockets
+    import websockets.exceptions
+except ImportError:
+    raise ImportError(
+        "websockets package is required but not available. "
+        "This should be installed automatically with discord.py. "
+        "Try restarting your bot or reinstalling the cog."
+    )
 
 log = logging.getLogger("red.realtalk.realtime")
 
