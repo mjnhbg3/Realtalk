@@ -386,7 +386,13 @@ class VoiceCapture:
             rms = np.sqrt(np.mean(audio.astype(np.float64) ** 2))
             normalized_rms = rms / 32768.0  # Normalize to 0-1 range
 
-            return normalized_rms > self.audio_threshold
+            ok = normalized_rms > self.audio_threshold
+            if not ok and self.frames_dropped < 5:
+                try:
+                    log.info(f"Audio below threshold: rms={normalized_rms:.5f} < th={self.audio_threshold:.5f}")
+                except Exception:
+                    pass
+            return ok
 
         except Exception as e:
             log.error(f"Error checking audio threshold: {e}")
@@ -465,6 +471,41 @@ class VoiceCapture:
         """Mix multiple audio streams with weighted priorities."""
         if not audio_streams:
             return None
+        try:
+            # Find the longest audio stream for padding
+            max_length = max(len(audio) for audio, _ in audio_streams)
+
+            # Convert all streams to numpy arrays and pad to same length
+            mixed_array = np.zeros(max_length // 2, dtype=np.float64)  # 16-bit = 2 bytes per sample
+            total_weight = sum(priority for _, priority in audio_streams)
+            if total_weight <= 0:
+                total_weight = 1.0
+
+            for audio_data, priority in audio_streams:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float64)
+
+                # Pad if necessary
+                if len(audio_array) < len(mixed_array):
+                    padded_array = np.zeros(len(mixed_array))
+                    padded_array[: len(audio_array)] = audio_array
+                    audio_array = padded_array
+                elif len(audio_array) > len(mixed_array):
+                    audio_array = audio_array[: len(mixed_array)]
+
+                # Add weighted audio
+                weight = priority / total_weight
+                mixed_array += audio_array * weight
+
+            # Soft limit and convert back to int16
+            max_val = np.max(np.abs(mixed_array))
+            if max_val > 32767:
+                mixed_array = mixed_array * (32767 / max_val)
+
+            return mixed_array.astype(np.int16).tobytes()
+
+        except Exception as e:
+            log.error(f"Error mixing audio streams: {e}")
+            return None
 
     def _downsample_48k_to_24k_mono(self, audio_data: bytes) -> Optional[bytes]:
         """Downsample 48kHz PCM16 (mono) to 24kHz by averaging pairs and decimating.
@@ -492,45 +533,7 @@ class VoiceCapture:
             log.error(f"Error downsampling audio to 24k mono: {e}")
             return None
 
-        try:
-            # Find the longest audio stream for padding
-            max_length = max(len(audio) for audio, _ in audio_streams)
-
-            # Convert all streams to numpy arrays and pad
-            mixed_array = np.zeros(
-                max_length // 2, dtype=np.float64
-            )  # 16-bit = 2 bytes per sample
-
-            total_weight = sum(priority for _, priority in audio_streams)
-
-            for audio_data, priority in audio_streams:
-                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(
-                    np.float64
-                )
-
-                # Pad if necessary
-                if len(audio_array) < len(mixed_array):
-                    padded_array = np.zeros(len(mixed_array))
-                    padded_array[: len(audio_array)] = audio_array
-                    audio_array = padded_array
-                elif len(audio_array) > len(mixed_array):
-                    audio_array = audio_array[: len(mixed_array)]
-
-                # Add weighted audio
-                weight = priority / total_weight
-                mixed_array += audio_array * weight
-
-            # Normalize and convert back to int16
-            # Apply soft limiting to prevent clipping
-            max_val = np.max(np.abs(mixed_array))
-            if max_val > 32767:
-                mixed_array = mixed_array * (32767 / max_val)
-
-            return mixed_array.astype(np.int16).tobytes()
-
-        except Exception as e:
-            log.error(f"Error mixing audio streams: {e}")
-            return None
+        
 
     def _update_performance_stats(self, current_time: float):
         """Update performance statistics."""
