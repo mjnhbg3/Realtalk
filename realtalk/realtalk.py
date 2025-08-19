@@ -253,6 +253,18 @@ class RealTalk(red_commands.Cog):
             status_lines.append(f"✅ Voice: Connected to {voice_client.channel.mention}")
         else:
             status_lines.append("❌ Voice: Not connected")
+        
+        # Voice client state details
+        try:
+            if voice_client and hasattr(voice_client, 'is_listening'):
+                status_lines.append(f"Listening: {'✅' if voice_client.is_listening() else '❌'}")
+        except Exception:
+            pass
+        try:
+            if voice_client:
+                status_lines.append(f"Playing: {'✅' if voice_client.is_playing() else '❌'}")
+        except Exception:
+            pass
             
         # Session status
         if guild_id in self.sessions:
@@ -291,6 +303,12 @@ class RealTalk(red_commands.Cog):
             status_lines.append(f"✅ PyNaCl: {nacl.__version__}")
         except ImportError:
             status_lines.append("❌ PyNaCl: Not installed")
+        
+        # Opus loaded?
+        try:
+            status_lines.append(f"Opus loaded: {'✅' if discord.opus.is_loaded() else '❌'}")
+        except Exception:
+            status_lines.append("Opus loaded: ❓")
             
         try:
             # Use the working import method

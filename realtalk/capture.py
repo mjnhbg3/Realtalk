@@ -636,11 +636,13 @@ if VOICE_RECV_AVAILABLE and _voice_recv is not None:  # pragma: no cover - runti
                 if not pcm:
                     # Fallback to opus if somehow PCM missing (shouldn't happen with wants_opus False)
                     opus = getattr(data, 'opus', None)
-                    if opus:
-                        # If opus, skip for now (decoder handled upstream by library)
-                        return
-
-                if not pcm:
+                    if self._frames_logged < 5:
+                        try:
+                            log.warning("VoiceData had no PCM; opus=%s bytes; Opus loaded=%s", 
+                                        len(opus) if opus else 0, getattr(discord.opus, 'is_loaded', lambda: False)())
+                        except Exception:
+                            pass
+                        self._frames_logged += 1
                     return
 
                 if self._frames_logged < 5:
