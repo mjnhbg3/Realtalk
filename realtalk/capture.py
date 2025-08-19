@@ -444,7 +444,10 @@ class VoiceCapture:
             if audio_to_mix:
                 mixed_audio = self._mix_audio_streams(audio_to_mix)
                 if mixed_audio:
-                    await self.realtime_client.send_audio(mixed_audio)
+                    # Downsample 48k -> 24k mono for Realtime API input expectations
+                    mixed_24k = self._downsample_48k_to_24k_mono(mixed_audio)
+                    if mixed_24k:
+                        await self.realtime_client.send_audio(mixed_24k)
 
         except Exception as e:
             log.error(f"Error sending mixed audio: {e}")
@@ -452,6 +455,40 @@ class VoiceCapture:
     def _mix_audio_streams(self, audio_streams: List[tuple]) -> Optional[bytes]:
         """Mix multiple audio streams with weighted priorities."""
         if not audio_streams:
+            return None
+
+    def _downsample_48k_to_24k_mono(self, audio_data: bytes) -> Optional[bytes]:
+        """Downsample 48kHz mono PCM16 to 24kHz mono by averaging pairs.
+
+        Assumes input is PCM16 mono. If stereo is passed, collapses to mono first.
+        """
+        try:
+            if not audio_data:
+                return audio_data
+
+            arr = np.frombuffer(audio_data, dtype=np.int16)
+
+            # If stereo interleaved, mix to mono first
+            if len(arr) % 2 == 0 and self.channels == 2:
+                stereo = arr.reshape(-1, 2)
+                mono = stereo.mean(axis=1).astype(np.int16)
+            else:
+                mono = arr
+
+            # Ensure even length for pairing
+            if mono.size % 2 == 1:
+                mono = mono[:-1]
+
+            # Average every two samples: simple antialiasing + decimation by 2
+            if mono.size == 0:
+                return b""
+
+            a = mono[0::2].astype(np.int32)
+            b = mono[1::2].astype(np.int32)
+            down = ((a + b) // 2).astype(np.int16)
+            return down.tobytes()
+        except Exception as e:
+            log.error(f"Error downsampling audio to 24k mono: {e}")
             return None
 
         try:

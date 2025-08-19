@@ -59,18 +59,18 @@ class RealtimeClient:
         self.audio_task: Optional[asyncio.Task] = None
         self._last_audio_sent_ts: float = 0.0
         self._awaiting_commit: bool = False
+        self._buffered_ms: float = 0.0
+        self.input_sample_rate: int = 24000  # we downsample capture to 24k before sending
+        self._response_active: bool = False
         
         # Session state
         self.session_config = {
             "modalities": ["text", "audio"],
             "instructions": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
             "voice": "alloy",
-            # Explicit audio formats & sample rates so server VAD interprets input correctly
             "input_audio_format": "pcm16",
-            "input_audio_sample_rate": 48000,
-            "input_audio_channels": 1,
             "output_audio_format": "pcm16",
-            "output_audio_sample_rate": 24000,
+            # Note: Realtime API currently infers sample rates; we downsample input to 24k
             "input_audio_transcription": {
                 "model": "whisper-1"
             },
@@ -194,18 +194,20 @@ class RealtimeClient:
 
                 if audio_data and self.session_active:
                     await self._send_audio_chunk(audio_data)
-                    self._last_audio_sent_ts = time.time()
+                    # Update buffered duration in ms
+                    try:
+                        samples = len(audio_data) // 2
+                        self._buffered_ms += (samples / self.input_sample_rate) * 1000.0
+                    except Exception:
+                        pass
                 else:
-                    # If we've been quiet for > silence_duration_ms and there is pending audio, auto-commit
-                    if self._awaiting_commit and self.session_active:
-                        now = time.time()
-                        silence_ms = self.session_config.get("turn_detection", {}).get("silence_duration_ms", 300)
-                        if self._last_audio_sent_ts and (now - self._last_audio_sent_ts) * 1000.0 > (silence_ms + 100):
-                            try:
-                                await self.commit_audio_buffer()
-                                await self.create_response()
-                            finally:
-                                self._awaiting_commit = False
+                    # Auto-commit only when we have at least 120ms buffered
+                    if self._awaiting_commit and self.session_active and self._buffered_ms >= 120.0:
+                        try:
+                            await self.commit_audio_buffer()
+                            await self.create_response()
+                        finally:
+                            self._awaiting_commit = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -236,6 +238,7 @@ class RealtimeClient:
             
         try:
             await self._send_message({"type": "input_audio_buffer.commit"})
+            self._buffered_ms = 0.0
         except Exception as e:
             log.error(f"Error committing audio buffer: {e}")
 
@@ -244,7 +247,9 @@ class RealtimeClient:
         if not self.session_active:
             return
         try:
-            await self._send_message({"type": "response.create"})
+            if not self._response_active:
+                await self._send_message({"type": "response.create"})
+                self._response_active = True
         except Exception as e:
             log.error(f"Error creating response: {e}")
 
@@ -254,7 +259,9 @@ class RealtimeClient:
             return
             
         try:
-            await self._send_message({"type": "response.cancel"})
+            if self._response_active:
+                await self._send_message({"type": "response.cancel"})
+                self._response_active = False
         except Exception as e:
             log.error(f"Error canceling response: {e}")
 
@@ -341,8 +348,9 @@ class RealtimeClient:
                     self.on_input_audio_buffer_speech_stopped()
                 # Commit audio buffer and trigger response
                 try:
-                    await self.commit_audio_buffer()
-                    await self.create_response()
+                    if self._buffered_ms >= 120.0:
+                        await self.commit_audio_buffer()
+                        await self.create_response()
                 except Exception as e:
                     log.error(f"Error finalizing response after speech: {e}")
                     
@@ -369,6 +377,7 @@ class RealtimeClient:
                     
             elif event_type == "response.done":
                 log.debug("Response completed")
+                self._response_active = False
                 
             elif event_type == "error":
                 error_info = event.get("error", {})

@@ -181,35 +181,20 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.error(f"Error adding audio to queue: {e}")
 
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
-        """Heuristically convert PCM16 to 48kHz stereo expected by Discord.
+        """Convert PCM16 to 48kHz stereo expected by Discord.
 
-        Assumes incoming is most likely 24kHz mono (OpenAI default for pcm16).
+        Assumes incoming is 24kHz mono (OpenAI default for pcm16) and upsamples by 2x.
         """
         try:
             if not audio_data:
                 return audio_data
 
-            arr = np.frombuffer(audio_data, dtype=np.int16)
-
-            # 20ms frames: 24k mono -> 480 samples (960 bytes), 48k stereo -> 1920 samples (3840 bytes)
-            is_24k_mono_like = (len(arr) % 480 == 0) and (len(arr) % 1920 != 0)
-
-            if is_24k_mono_like:
-                # Upsample 24k -> 48k by simple duplication
-                upsampled = np.repeat(arr, 2)
-                # Duplicate to stereo (interleave LR)
-                stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
-                return stereo.astype(np.int16).tobytes()
-
-            # If data length suggests 48k mono 20ms frames (960 samples -> 1920 bytes), make stereo
-            is_48k_mono_like = (len(arr) % 960 == 0) and (len(arr) % 1920 == 0)
-            if is_48k_mono_like:
-                stereo = np.column_stack((arr, arr)).reshape(-1)
-                return stereo.astype(np.int16).tobytes()
-
-            # Assume already stereo or appropriate format
-            return audio_data
-
+            mono = np.frombuffer(audio_data, dtype=np.int16)
+            # Upsample 24k -> 48k by repeating samples (zero-order hold)
+            upsampled = np.repeat(mono, 2)
+            # Duplicate to stereo (interleave LR)
+            stereo = np.column_stack((upsampled, upsampled)).reshape(-1).astype(np.int16)
+            return stereo.tobytes()
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
             return audio_data
