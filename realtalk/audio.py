@@ -124,9 +124,9 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # No audio available - return silence to prevent underrun
+                    # No audio available - signal stream end so Discord stops "speaking"
                     self.underrun_count += 1
-                    return self.silence_frame
+                    return b''
                     
         except Exception as e:
             log.error(f"Error reading audio frame: {e}")
@@ -161,8 +161,8 @@ class PCMQueueAudioSource(discord.AudioSource):
             return
             
         try:
-            # Convert mono to stereo if needed
-            processed_data = self._ensure_stereo(audio_data)
+            # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord
+            processed_data = self._to_48k_stereo(audio_data)
             
             # Split into frames
             frames = self._split_into_frames(processed_data)
@@ -180,24 +180,38 @@ class PCMQueueAudioSource(discord.AudioSource):
         except Exception as e:
             log.error(f"Error adding audio to queue: {e}")
 
-    def _ensure_stereo(self, audio_data: bytes) -> bytes:
-        """Convert mono audio to stereo if needed."""
+    def _to_48k_stereo(self, audio_data: bytes) -> bytes:
+        """Heuristically convert PCM16 to 48kHz stereo expected by Discord.
+
+        Assumes incoming is most likely 24kHz mono (OpenAI default for pcm16).
+        """
         try:
-            # Calculate samples per channel
-            total_samples = len(audio_data) // 2  # 16-bit = 2 bytes per sample
-            
-            if total_samples % 2 == 1:
-                # Odd number of samples suggests mono audio
-                audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                # Duplicate mono to stereo
-                stereo_array = np.repeat(audio_array, 2)
-                return stereo_array.tobytes()
-            else:
-                # Assume already stereo
+            if not audio_data:
                 return audio_data
-                
+
+            arr = np.frombuffer(audio_data, dtype=np.int16)
+
+            # 20ms frames: 24k mono -> 480 samples (960 bytes), 48k stereo -> 1920 samples (3840 bytes)
+            is_24k_mono_like = (len(arr) % 480 == 0) and (len(arr) % 1920 != 0)
+
+            if is_24k_mono_like:
+                # Upsample 24k -> 48k by simple duplication
+                upsampled = np.repeat(arr, 2)
+                # Duplicate to stereo (interleave LR)
+                stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
+                return stereo.astype(np.int16).tobytes()
+
+            # If data length suggests 48k mono 20ms frames (960 samples -> 1920 bytes), make stereo
+            is_48k_mono_like = (len(arr) % 960 == 0) and (len(arr) % 1920 == 0)
+            if is_48k_mono_like:
+                stereo = np.column_stack((arr, arr)).reshape(-1)
+                return stereo.astype(np.int16).tobytes()
+
+            # Assume already stereo or appropriate format
+            return audio_data
+
         except Exception as e:
-            log.error(f"Error converting audio to stereo: {e}")
+            log.error(f"Error converting audio to 48k stereo: {e}")
             return audio_data
 
     def _split_into_frames(self, audio_data: bytes) -> list:

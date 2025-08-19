@@ -584,13 +584,37 @@ if VOICE_RECV_AVAILABLE and _voice_recv is not None:  # pragma: no cover - runti
             """Return False to receive decoded PCM audio data instead of opus packets."""
             return False
 
-        def write(self, data: bytes, user: discord.User) -> None:  # signature from voice-recv
+        def write(self, user: Optional[discord.abc.User], data: _voice_recv.VoiceData) -> None:  # signature from voice-recv
             try:
-                user_id = getattr(user, "id", None)
+                # Prefer PCM (decoded) data since wants_opus() returns False
+                pcm: bytes = getattr(data, 'pcm', b'') or b''
+                if not pcm:
+                    # Fallback to opus if somehow PCM missing (shouldn't happen with wants_opus False)
+                    opus = getattr(data, 'opus', None)
+                    if opus:
+                        # If opus, skip for now (decoder handled upstream by library)
+                        return
+
+                if not pcm:
+                    return
+
+                # Determine a stable key for the speaker
+                user_id: Optional[int] = None
+                if user is not None:
+                    user_id = getattr(user, 'id', None)
                 if user_id is None:
-                    # Some implementations may pass user_id directly
-                    user_id = int(user)
-                self.capture.add_audio_data(int(user_id), data)
+                    # Try VoiceData.source
+                    source = getattr(data, 'source', None)
+                    user_id = getattr(source, 'id', None)
+                if user_id is None:
+                    # Fallback to SSRC to group audio by stream
+                    packet = getattr(data, 'packet', None)
+                    user_id = getattr(packet, 'ssrc', 0)
+
+                if user_id is None:
+                    return
+
+                self.capture.add_audio_data(int(user_id), pcm)
             except Exception as e:
                 log.error(f"Error in EnhancedAudioSink.write: {e}")
 

@@ -603,14 +603,21 @@ class RealTalk(red_commands.Cog):
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
             
-            # Set up audio output callback
-            realtime_client.on_audio_output = lambda audio_data: audio_source.put_audio(audio_data)
+            # Set up audio output callback: enqueue and start playback on demand
+            def _handle_audio_output(audio_data: bytes):
+                try:
+                    audio_source.put_audio(audio_data)
+                    if voice_client and not voice_client.is_playing():
+                        voice_client.play(audio_source)
+                except Exception:
+                    pass
+
+            realtime_client.on_audio_output = _handle_audio_output
             
             # Start voice capture
             await voice_capture.start()
             
-            # Start playing audio source
-            voice_client.play(audio_source)
+            # Do not start playing until we actually have audio; the callback above will trigger playback
             
             log.info(f"Started AI conversation session for guild {guild_id}")
             
@@ -621,10 +628,10 @@ class RealTalk(red_commands.Cog):
 
     async def _cleanup_session(self, guild_id: int):
         """Clean up session resources."""
-        if guild_id not in self.sessions:
+        # Atomically remove the session to make cleanup idempotent
+        session = self.sessions.pop(guild_id, None)
+        if not session:
             return
-            
-        session = self.sessions[guild_id]
         
         try:
             # Stop voice capture
@@ -650,9 +657,6 @@ class RealTalk(red_commands.Cog):
         except Exception as e:
             log.error(f"Error during session cleanup: {e}")
         finally:
-            # Remove session
-            del self.sessions[guild_id]
-            
             # Clean up retry state
             if guild_id in self.retry_state:
                 del self.retry_state[guild_id]

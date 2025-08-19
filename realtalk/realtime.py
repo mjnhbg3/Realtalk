@@ -219,6 +219,15 @@ class RealtimeClient:
         except Exception as e:
             log.error(f"Error committing audio buffer: {e}")
 
+    async def create_response(self):
+        """Request response generation for the committed input."""
+        if not self.session_active:
+            return
+        try:
+            await self._send_message({"type": "response.create"})
+        except Exception as e:
+            log.error(f"Error creating response: {e}")
+
     async def cancel_response(self):
         """Cancel ongoing response generation."""
         if not self.session_active:
@@ -300,11 +309,22 @@ class RealtimeClient:
                 log.debug("Speech started")
                 if self.on_input_audio_buffer_speech_started:
                     self.on_input_audio_buffer_speech_started()
+                # Attempt to cancel any ongoing response for barge-in
+                try:
+                    await self.cancel_response()
+                except Exception:
+                    pass
                     
             elif event_type == "input_audio_buffer.speech_stopped":
                 log.debug("Speech stopped")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
+                # Commit audio buffer and trigger response
+                try:
+                    await self.commit_audio_buffer()
+                    await self.create_response()
+                except Exception as e:
+                    log.error(f"Error finalizing response after speech: {e}")
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
