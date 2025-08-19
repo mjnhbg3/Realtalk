@@ -511,6 +511,36 @@ class RealTalk(red_commands.Cog):
             prompt = "(empty)"
         await ctx.send(f"Current system prompt:\n{box(prompt)}")
 
+    @show_group.command(name="config")
+    async def show_config(self, ctx: red_commands.Context):
+        """Show all RealTalk configuration values set via [p]realtalk set."""
+        model = await self.config.realtime_model()
+        voice = await self.config.voice()
+        prompt = await self.config.system_prompt()
+        sv_threshold = await self.config.server_vad_threshold()
+        sv_silence = await self.config.server_vad_silence_ms()
+        transcribe = await self.config.transcribe_model()
+        noise = await self.config.noise_mode()
+        mix = await self.config.mix_multiple()
+        local_threshold = await self.config.audio_threshold()
+        idle = await self.config.idle_timeout()
+
+        lines = [
+            "**RealTalk Settings**",
+            f"Model: `{model}`",
+            f"Voice: `{voice}`",
+            f"Server VAD: threshold={sv_threshold}, silence={sv_silence}ms",
+            f"Transcription: `{transcribe}`",
+            f"Noise reduction: `{noise}`",
+            f"Mix multiple speakers: `{mix}`",
+            f"Local audio threshold: `{local_threshold}`",
+            f"Idle timeout: `{idle}` seconds",
+            "",
+            "System prompt:",
+            box(prompt or "(empty)")
+        ]
+        await ctx.send("\n".join(lines))
+
     @set_group.command(name="threshold")
     async def set_threshold(self, ctx: red_commands.Context, value: float):
         """Set local audio activity threshold (0.0001–1.0). Lower = more sensitive."""
