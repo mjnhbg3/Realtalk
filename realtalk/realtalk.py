@@ -48,7 +48,7 @@ class RealTalk(red_commands.Cog):
             "retry_base_delay": 2.0,
             "voice_timeout": 30.0,
             "audio_threshold": 0.001,
-            "silence_threshold": 300,  # 300ms for reduced latency
+            "silence_threshold": 300,  # local silence hangover (ms) before user stops speaking
             # New configurable options
             "voice": "Alloy",
             "system_prompt": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
@@ -524,6 +524,7 @@ class RealTalk(red_commands.Cog):
         mix = await self.config.mix_multiple()
         local_threshold = await self.config.audio_threshold()
         idle = await self.config.idle_timeout()
+        local_silence = await self.config.silence_threshold()
 
         lines = [
             "**RealTalk Settings**",
@@ -534,6 +535,7 @@ class RealTalk(red_commands.Cog):
             f"Noise reduction: `{noise}`",
             f"Mix multiple speakers: `{mix}`",
             f"Local audio threshold: `{local_threshold}`",
+            f"Local silence hangover: `{local_silence}` ms",
             f"Idle timeout: `{idle}` seconds",
             "",
             "System prompt:",
@@ -549,6 +551,15 @@ class RealTalk(red_commands.Cog):
             return
         await self.config.audio_threshold.set(value)
         await ctx.send(f"Audio activity threshold set to {value}. Rejoin voice to apply.")
+
+    @set_group.command(name="localsilence")
+    async def set_local_silence(self, ctx: red_commands.Context, ms: int):
+        """Set local silence hangover (ms) before we mark the user as stopped speaking (50–3000 ms)."""
+        if ms < 50 or ms > 3000:
+            await ctx.send("Invalid value. Choose 50..3000 ms")
+            return
+        await self.config.silence_threshold.set(ms)
+        await ctx.send(f"Local silence hangover set to {ms} ms. Rejoin voice to apply.")
 
     @set_group.command(name="vad")
     async def set_vad(self, ctx: red_commands.Context, threshold: float, silence_ms: int = 300):
