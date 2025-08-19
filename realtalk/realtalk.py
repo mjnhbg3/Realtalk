@@ -353,12 +353,50 @@ class RealTalk(red_commands.Cog):
         if not successful_import:
             debug_info.append("⚠️ No successful import patterns found")
             
-        # Check if we can find the package
+        # Check if we can find the package and examine its structure
         try:
             import pkg_resources
+            import os
             pkg = pkg_resources.get_distribution("discord-ext-voice-recv")
             debug_info.append(f"📦 Package info: {pkg.project_name} {pkg.version}")
             debug_info.append(f"📦 Package location: {pkg.location}")
+            
+            # Examine package directory structure
+            package_path = pkg.location
+            if os.path.exists(package_path):
+                debug_info.append(f"📁 Package directory contents:")
+                
+                # Check for common patterns
+                patterns_to_check = [
+                    "discord",
+                    "discord/ext",
+                    "discord_ext_voice_recv", 
+                    "voice_recv",
+                    "*voice*",
+                ]
+                
+                for pattern in patterns_to_check:
+                    if "*" in pattern:
+                        # Find files/dirs matching pattern
+                        try:
+                            import glob
+                            matches = glob.glob(os.path.join(package_path, pattern))
+                            if matches:
+                                debug_info.append(f"  Pattern '{pattern}': {[os.path.basename(m) for m in matches[:3]]}")
+                        except:
+                            pass
+                    else:
+                        full_path = os.path.join(package_path, pattern)
+                        if os.path.exists(full_path):
+                            is_dir = "📁" if os.path.isdir(full_path) else "📄"
+                            debug_info.append(f"  {is_dir} {pattern} - EXISTS")
+                            
+                            # If it's discord/ext, check what's inside
+                            if pattern == "discord/ext" and os.path.isdir(full_path):
+                                ext_contents = os.listdir(full_path)
+                                debug_info.append(f"    Contents: {ext_contents[:5]}")
+                        else:
+                            debug_info.append(f"  ❌ {pattern} - NOT FOUND")
         except Exception as e:
             debug_info.append(f"📦 Package info unavailable: {e}")
             

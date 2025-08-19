@@ -22,10 +22,12 @@ VOICE_RECV_AVAILABLE = False
 
 # Try multiple import patterns for different versions
 import importlib
+import sys
+import os
 
+# First try standard imports
 import_attempts = [
     ("from discord.ext import voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
-    ("direct discord.ext.voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
     ("discord_ext_voice_recv", lambda: importlib.import_module("discord_ext_voice_recv")),
     ("voice_recv standalone", lambda: importlib.import_module("voice_recv")),
 ]
@@ -49,6 +51,63 @@ for pattern_desc, import_func in import_attempts:
     except Exception as e:
         log.debug(f"Unexpected error with pattern '{pattern_desc}': {e}")
         continue
+
+# If standard imports failed, try to find and load from package installation
+if not VOICE_RECV_AVAILABLE:
+    try:
+        import pkg_resources
+        pkg = pkg_resources.get_distribution("discord-ext-voice-recv")
+        package_path = pkg.location
+        log.debug(f"Found discord-ext-voice-recv package at: {package_path}")
+        
+        # Add package path to sys.path if not already there
+        if package_path not in sys.path:
+            sys.path.insert(0, package_path)
+            log.debug(f"Added {package_path} to sys.path")
+        
+        # Try various paths within the package
+        potential_paths = [
+            os.path.join(package_path, "discord", "ext"),
+            os.path.join(package_path, "discord_ext_voice_recv"),
+            os.path.join(package_path, "voice_recv"),
+            package_path,
+        ]
+        
+        for path in potential_paths:
+            if os.path.exists(path):
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+                    log.debug(f"Added potential module path: {path}")
+                
+        # Try importing again after path manipulation
+        import_attempts_post_path = [
+            ("post-path discord.ext.voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
+            ("post-path voice_recv", lambda: importlib.import_module("voice_recv")),
+            ("post-path discord_ext_voice_recv", lambda: importlib.import_module("discord_ext_voice_recv")),
+        ]
+        
+        for pattern_desc, import_func in import_attempts_post_path:
+            try:
+                _voice_recv = import_func()
+                
+                # Verify the module has the required components
+                if hasattr(_voice_recv, 'VoiceRecvClient') or hasattr(_voice_recv, 'AudioSink'):
+                    VOICE_RECV_AVAILABLE = True
+                    log.info(f"discord-ext-voice-recv imported successfully using: {pattern_desc}")
+                    break
+                else:
+                    log.debug(f"Module imported via '{pattern_desc}' but missing required components")
+                    continue
+                    
+            except ImportError as e:
+                log.debug(f"Post-path import pattern '{pattern_desc}' failed: {e}")
+                continue
+            except Exception as e:
+                log.debug(f"Unexpected error with post-path pattern '{pattern_desc}': {e}")
+                continue
+                
+    except Exception as e:
+        log.debug(f"Failed to manipulate sys.path for discord-ext-voice-recv: {e}")
 
 if not VOICE_RECV_AVAILABLE:
     log.warning("All discord-ext-voice-recv import patterns failed. Voice recording will not be available.")
