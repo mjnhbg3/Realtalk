@@ -49,6 +49,14 @@ class RealTalk(red_commands.Cog):
             "voice_timeout": 30.0,
             "audio_threshold": 0.001,
             "silence_threshold": 300,  # 300ms for reduced latency
+            # New configurable options
+            "voice": "Alloy",
+            "server_vad_threshold": 0.5,
+            "server_vad_silence_ms": 300,
+            "transcribe_model": "gpt-4o-mini-transcribe",
+            "noise_mode": "near",  # none|near|far
+            "mix_multiple": True,
+            "idle_timeout": 60,
         }
         
         default_guild = {
@@ -475,9 +483,7 @@ class RealTalk(red_commands.Cog):
         if v not in allowed:
             await ctx.send("Invalid voice. Choose from: Alloy, Ash, Ballad, Coral, Echo, Sage, Shimmer, Verse")
             return
-        # Save in realtime client session config on next connect via context config cache
-        # We store in bot-wide memory via config shared
-        await self.bot._config.custom("realtalk").voice.set(voice.title())  # type: ignore[attr-defined]
+        await self.config.voice.set(voice.title())
         await ctx.send(f"Voice set to `{voice.title()}`. Rejoin voice to apply.")
 
     @set_group.command(name="threshold")
@@ -495,8 +501,8 @@ class RealTalk(red_commands.Cog):
         if not (0.0 <= threshold <= 1.0) or silence_ms < 50 or silence_ms > 3000:
             await ctx.send("Invalid values. threshold 0..1, silence 50..3000 ms")
             return
-        # Store in a separate place
-        await self.bot._config.custom("realtalk").server_vad.set({"threshold": threshold, "silence_ms": silence_ms})  # type: ignore[attr-defined]
+        await self.config.server_vad_threshold.set(threshold)
+        await self.config.server_vad_silence_ms.set(silence_ms)
         await ctx.send(f"Server VAD set: threshold={threshold}, silence={silence_ms}ms. Applied on next session.")
 
     @set_group.command(name="noise")
@@ -506,13 +512,13 @@ class RealTalk(red_commands.Cog):
         if m not in {"none","near","far"}:
             await ctx.send("Invalid mode. Choose from: none, near, far")
             return
-        await self.bot._config.custom("realtalk").noise.set(m)  # type: ignore[attr-defined]
+        await self.config.noise_mode.set(m)
         await ctx.send(f"Noise reduction set to `{m}`. Rejoin voice to apply.")
 
     @set_group.command(name="mix")
     async def set_mix(self, ctx: red_commands.Context, enabled: bool):
         """Enable or disable multi-speaker mixing (true/false)."""
-        await self.bot._config.custom("realtalk").mix.set(bool(enabled))  # type: ignore[attr-defined]
+        await self.config.mix_multiple.set(bool(enabled))
         await ctx.send(f"Multi-speaker mixing {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
 
     @set_group.command(name="transcribe")
@@ -522,8 +528,17 @@ class RealTalk(red_commands.Cog):
         if m not in {"gpt-4o-mini-transcribe","none"}:
             await ctx.send("Invalid model. Use 'gpt-4o-mini-transcribe' or 'none'")
             return
-        await self.bot._config.custom("realtalk").transcribe.set(m)  # type: ignore[attr-defined]
+        await self.config.transcribe_model.set(m)
         await ctx.send(f"Transcription model set to `{m}`. Rejoin voice to apply.")
+
+    @set_group.command(name="idle")
+    async def set_idle(self, ctx: red_commands.Context, seconds: int):
+        """Set idle timeout (seconds) before auto-leave on no voice activity."""
+        if seconds < 10 or seconds > 3600:
+            await ctx.send("Invalid value. Choose 10..3600 seconds")
+            return
+        await self.config.idle_timeout.set(seconds)
+        await ctx.send(f"Idle timeout set to {seconds}s. Rejoin voice to apply.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
@@ -671,27 +686,18 @@ class RealTalk(red_commands.Cog):
         try:
             # Initialize Realtime client with configured model and options
             model_name = await self.config.realtime_model()
-            # Optional settings from custom section
-            voice_name = None
-            transcribe_model = None
-            server_vad = None
-            noise_mode = None
-            mix_enabled = True
-            try:
-                store = self.bot._config.custom("realtalk")  # type: ignore[attr-defined]
-                voice_name = await store.voice()  # type: ignore
-                transcribe_model = await store.transcribe()  # type: ignore
-                server_vad = await store.server_vad()  # type: ignore
-                noise_mode = await store.noise()  # type: ignore
-                mix_enabled = await store.mix()  # type: ignore
-            except Exception:
-                pass
+            voice_name = await self.config.voice()
+            transcribe_model = await self.config.transcribe_model()
+            server_vad = {
+                "threshold": await self.config.server_vad_threshold(),
+                "silence_ms": await self.config.server_vad_silence_ms(),
+            }
 
             realtime_client = RealtimeClient(
                 api_key,
                 model=model_name,
                 voice=voice_name,
-                transcribe=transcribe_model or "gpt-4o-mini-transcribe",
+                transcribe=transcribe_model,
                 server_vad=server_vad,
             )
             
@@ -704,6 +710,7 @@ class RealTalk(red_commands.Cog):
             )
             # Apply noise mode and mixing
             try:
+                noise_mode = await self.config.noise_mode()
                 if noise_mode == "none":
                     voice_capture.set_noise_gate(False)
                 elif noise_mode == "near":
@@ -715,6 +722,7 @@ class RealTalk(red_commands.Cog):
             except Exception:
                 pass
             try:
+                mix_enabled = await self.config.mix_multiple()
                 voice_capture.set_speaker_mixing(bool(mix_enabled))
             except Exception:
                 pass
@@ -750,6 +758,11 @@ class RealTalk(red_commands.Cog):
             await voice_capture.start()
             
             # Do not start playing until we actually have audio; the callback above will trigger playback
+
+            # Start monitor for idle/no-people auto-leave
+            idle_timeout = await self.config.idle_timeout()
+            monitor_task = asyncio.create_task(self._monitor_session(guild_id, idle_timeout))
+            self.sessions[guild_id]["monitor_task"] = monitor_task
             
             log.info(f"Started AI conversation session for guild {guild_id}")
             
@@ -766,6 +779,13 @@ class RealTalk(red_commands.Cog):
             return
         
         try:
+            # Cancel monitor task
+            monitor_task = session.get("monitor_task")
+            if monitor_task:
+                try:
+                    monitor_task.cancel()
+                except Exception:
+                    pass
             # Stop voice capture
             voice_capture = session.get("voice_capture")
             if voice_capture:
@@ -798,12 +818,62 @@ class RealTalk(red_commands.Cog):
     @red_commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         """Handle voice state updates for automatic cleanup."""
-        if member != self.bot.user:
-            return
-            
         guild_id = member.guild.id
-        
-        # If bot was disconnected from voice
-        if before.channel and not after.channel and guild_id in self.sessions:
-            log.info(f"Bot disconnected from voice in guild {guild_id}, cleaning up session")
-            await self._cleanup_session(guild_id)
+        session = self.sessions.get(guild_id)
+        if not session:
+            return
+        voice_client: discord.VoiceClient = session.get("voice_client")
+        if not voice_client:
+            return
+
+        # If the bot disconnected, cleanup
+        if member.id == self.bot.user.id:
+            if before.channel and not after.channel:
+                log.info(f"Bot disconnected from voice in guild {guild_id}, cleaning up session")
+                await self._cleanup_session(guild_id)
+            return
+
+        # If any user leaves/swaps and bot is alone now, leave
+        if voice_client.channel:
+            others = [m for m in voice_client.channel.members if m.id != self.bot.user.id]
+            if len(others) == 0:
+                log.info(f"No other members in voice; leaving guild {guild_id}")
+                await self._cleanup_session(guild_id)
+
+    async def _monitor_session(self, guild_id: int, idle_timeout: int):
+        """Monitor session for idle/no-people leave conditions."""
+        while guild_id in self.sessions:
+            try:
+                session = self.sessions.get(guild_id)
+                if not session:
+                    break
+                voice_client: discord.VoiceClient = session.get("voice_client")
+                capture: VoiceCapture = session.get("voice_capture")
+                if not voice_client or not capture:
+                    break
+
+                # Leave if alone in channel
+                if voice_client.channel:
+                    others = [m for m in voice_client.channel.members if m.id != self.bot.user.id]
+                    if len(others) == 0:
+                        log.info(f"Auto-leave: alone in channel for guild {guild_id}")
+                        await self._cleanup_session(guild_id)
+                        break
+
+                # Leave if idle beyond threshold (no incoming voice captured)
+                last_any = 0.0
+                if capture.last_audio_time:
+                    try:
+                        last_any = max(capture.last_audio_time.values())
+                    except Exception:
+                        last_any = 0.0
+                if last_any and (time.time() - last_any) > idle_timeout:
+                    log.info(f"Auto-leave: idle for {idle_timeout}s in guild {guild_id}")
+                    await self._cleanup_session(guild_id)
+                    break
+
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(10)
