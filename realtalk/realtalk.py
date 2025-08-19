@@ -326,21 +326,49 @@ class RealTalk(red_commands.Cog):
         except ImportError:
             debug_info.append("❌ discord.ext not available")
             
-        # Check voice_recv import
-        try:
-            from discord.ext import voice_recv
-            debug_info.append("✅ voice_recv import successful")
-            debug_info.append(f"voice_recv location: {voice_recv.__file__}")
-        except ImportError as e:
-            debug_info.append(f"❌ voice_recv import failed: {e}")
+        # Try multiple import patterns
+        import_patterns = [
+            ("from discord.ext import voice_recv", lambda: __import__('discord.ext.voice_recv', fromlist=['voice_recv'])),
+            ("import discord_ext_voice_recv", lambda: __import__('discord_ext_voice_recv')),
+            ("direct module import", lambda: __import__('voice_recv')),
+        ]
+        
+        successful_import = None
+        for pattern_name, import_func in import_patterns:
+            try:
+                module = import_func()
+                debug_info.append(f"✅ {pattern_name}: SUCCESS")
+                debug_info.append(f"  Module location: {getattr(module, '__file__', 'unknown')}")
+                if hasattr(module, 'VoiceRecvClient'):
+                    debug_info.append(f"  VoiceRecvClient available: ✅")
+                else:
+                    debug_info.append(f"  VoiceRecvClient available: ❌")
+                successful_import = module
+                break
+            except ImportError as e:
+                debug_info.append(f"❌ {pattern_name}: {e}")
+            except Exception as e:
+                debug_info.append(f"❌ {pattern_name}: Unexpected error: {e}")
+                
+        if not successful_import:
+            debug_info.append("⚠️ No successful import patterns found")
             
         # Check if we can find the package
         try:
             import pkg_resources
             pkg = pkg_resources.get_distribution("discord-ext-voice-recv")
-            debug_info.append(f"Package info: {pkg.project_name} {pkg.version}")
+            debug_info.append(f"📦 Package info: {pkg.project_name} {pkg.version}")
+            debug_info.append(f"📦 Package location: {pkg.location}")
         except Exception as e:
-            debug_info.append(f"Package info unavailable: {e}")
+            debug_info.append(f"📦 Package info unavailable: {e}")
+            
+        # Check sys.path for relevant paths
+        import sys
+        voice_paths = [path for path in sys.path if 'discord' in path.lower() or 'voice' in path.lower()]
+        if voice_paths:
+            debug_info.append(f"🔍 Relevant paths in sys.path:")
+            for path in voice_paths[:3]:  # Show first 3 to avoid spam
+                debug_info.append(f"  {path}")
             
         await ctx.send("**Voice Capture Debug Info:**\n```\n" + "\n".join(debug_info) + "\n```")
 

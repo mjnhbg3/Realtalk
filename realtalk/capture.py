@@ -17,18 +17,41 @@ import discord
 log = logging.getLogger("red.realtalk.capture")
 
 # Optional dependency: discord-ext-voice-recv (third-party)
-try:
-    from discord.ext import voice_recv as _voice_recv  # type: ignore
-    VOICE_RECV_AVAILABLE = True
-    log.info("discord-ext-voice-recv imported successfully")
-except ImportError as e:
-    _voice_recv = None  # type: ignore
-    VOICE_RECV_AVAILABLE = False
-    log.warning(f"discord-ext-voice-recv not available: {e}")
-except Exception as e:
-    _voice_recv = None  # type: ignore
-    VOICE_RECV_AVAILABLE = False
-    log.error(f"Unexpected error importing discord-ext-voice-recv: {e}")
+_voice_recv = None
+VOICE_RECV_AVAILABLE = False
+
+# Try multiple import patterns for different versions
+import importlib
+
+import_attempts = [
+    ("from discord.ext import voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
+    ("direct discord.ext.voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
+    ("discord_ext_voice_recv", lambda: importlib.import_module("discord_ext_voice_recv")),
+    ("voice_recv standalone", lambda: importlib.import_module("voice_recv")),
+]
+
+for pattern_desc, import_func in import_attempts:
+    try:
+        _voice_recv = import_func()
+        
+        # Verify the module has the required components
+        if hasattr(_voice_recv, 'VoiceRecvClient') or hasattr(_voice_recv, 'AudioSink'):
+            VOICE_RECV_AVAILABLE = True
+            log.info(f"discord-ext-voice-recv imported successfully using: {pattern_desc}")
+            break
+        else:
+            log.debug(f"Module imported via '{pattern_desc}' but missing required components")
+            continue
+            
+    except ImportError as e:
+        log.debug(f"Import pattern '{pattern_desc}' failed: {e}")
+        continue
+    except Exception as e:
+        log.debug(f"Unexpected error with pattern '{pattern_desc}': {e}")
+        continue
+
+if not VOICE_RECV_AVAILABLE:
+    log.warning("All discord-ext-voice-recv import patterns failed. Voice recording will not be available.")
 
 from .realtime import RealtimeClient
 
