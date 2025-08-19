@@ -63,6 +63,9 @@ class RealTalk(red_commands.Cog):
         
         # Voice connection retry state
         self.retry_state: Dict[int, Dict[str, Any]] = {}
+        
+        # Version identifier for enhanced cog
+        self.__version__ = "2.0.0-enhanced"
 
     async def cog_unload(self):
         """Clean up when cog is unloaded."""
@@ -73,6 +76,60 @@ class RealTalk(red_commands.Cog):
     async def realtalk(self, ctx: red_commands.Context):
         """RealTalk voice assistant commands."""
         pass
+    
+    @realtalk.command(name="version")
+    async def version_command(self, ctx: red_commands.Context):
+        """Show RealTalk version and discord.py compatibility info."""
+        embed = discord.Embed(
+            title=f"🤖 RealTalk v{self.__version__}",
+            description="Enhanced Discord voice assistant with 4006 error fixes",
+            color=0x00ff00
+        )
+        
+        # Check discord.py version
+        try:
+            version = discord.__version__
+            major, minor = map(int, version.split('.')[:2])
+            
+            if major < 2 or (major == 2 and minor < 4):
+                embed.add_field(
+                    name="⚠️ Discord.py Version Warning",
+                    value=f"Current: {version}\n"
+                          "Recommended: ≥2.4.0 for voice protocol v8\n"
+                          f"**Fix**: `{ctx.clean_prefix}pipinstall -U discord.py`",
+                    inline=False
+                )
+                embed.color = 0xff9900
+            else:
+                embed.add_field(
+                    name="✅ Discord.py Compatible",
+                    value=f"Version {version} supports voice protocol v8",
+                    inline=False
+                )
+        except Exception:
+            embed.add_field(
+                name="❌ Discord.py Check Failed",
+                value="Could not determine discord.py version",
+                inline=False
+            )
+            
+        # Check PyNaCl
+        try:
+            import nacl
+            embed.add_field(
+                name="✅ PyNaCl",
+                value="Available for voice encryption",
+                inline=True
+            )
+        except ImportError:
+            embed.add_field(
+                name="❌ PyNaCl Missing",
+                value=f"Install: `{ctx.clean_prefix}pipinstall PyNaCl>=1.5.0`",
+                inline=True
+            )
+            
+        embed.set_footer(text="Use realtalk setup for installation guide")
+        await ctx.send(embed=embed)
 
     @realtalk.command(name="setup")
     async def setup_command(self, ctx: red_commands.Context):
