@@ -30,6 +30,7 @@ import_attempts = [
     ("from discord.ext import voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
     ("discord_ext_voice_recv", lambda: importlib.import_module("discord_ext_voice_recv")),
     ("voice_recv standalone", lambda: importlib.import_module("voice_recv")),
+    ("direct __import__ voice_recv", lambda: __import__('voice_recv')),
 ]
 
 for pattern_desc, import_func in import_attempts:
@@ -84,6 +85,7 @@ if not VOICE_RECV_AVAILABLE:
             ("post-path discord.ext.voice_recv", lambda: importlib.import_module("discord.ext.voice_recv")),
             ("post-path voice_recv", lambda: importlib.import_module("voice_recv")),
             ("post-path discord_ext_voice_recv", lambda: importlib.import_module("discord_ext_voice_recv")),
+            ("post-path direct __import__ voice_recv", lambda: __import__('voice_recv')),
         ]
         
         for pattern_desc, import_func in import_attempts_post_path:
