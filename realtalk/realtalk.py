@@ -304,9 +304,45 @@ class RealTalk(red_commands.Cog):
         try:
             import discord.ext.voice_recv
             await ctx.send("✅ Voice capture is available (discord-ext-voice-recv installed)")
+        except ImportError as e:
+            await ctx.send(f"❌ Voice capture not available: {e}\n"
+                         f"This dependency should have been installed automatically.\n"
+                         f"Try: `{ctx.clean_prefix}cog update` and `{ctx.clean_prefix}cog reload realtalk`\n"
+                         f"Or manual install: `{ctx.clean_prefix}pip install git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git`")
+                         
+    @sinks_command.command(name="debug")
+    async def sinks_debug(self, ctx: red_commands.Context):
+        """Debug voice capture import issues."""
+        debug_info = []
+        
+        # Check discord.py version
+        import discord
+        debug_info.append(f"discord.py version: {discord.__version__}")
+        
+        # Check if discord.ext exists
+        try:
+            import discord.ext
+            debug_info.append("✅ discord.ext available")
         except ImportError:
-            await ctx.send("❌ Voice capture not available. This dependency should have been installed automatically.\n"
-                         f"Try restarting your bot or use `{ctx.clean_prefix}cog update` and `{ctx.clean_prefix}cog reload realtalk`.")
+            debug_info.append("❌ discord.ext not available")
+            
+        # Check voice_recv import
+        try:
+            from discord.ext import voice_recv
+            debug_info.append("✅ voice_recv import successful")
+            debug_info.append(f"voice_recv location: {voice_recv.__file__}")
+        except ImportError as e:
+            debug_info.append(f"❌ voice_recv import failed: {e}")
+            
+        # Check if we can find the package
+        try:
+            import pkg_resources
+            pkg = pkg_resources.get_distribution("discord-ext-voice-recv")
+            debug_info.append(f"Package info: {pkg.project_name} {pkg.version}")
+        except Exception as e:
+            debug_info.append(f"Package info unavailable: {e}")
+            
+        await ctx.send("**Voice Capture Debug Info:**\n```\n" + "\n".join(debug_info) + "\n```")
 
     @realtalk.command(name="set")
     async def set_config(self, ctx: red_commands.Context, key: str, *, value: str):

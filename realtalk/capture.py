@@ -13,17 +13,24 @@ from typing import Optional, Dict, Any, List
 import numpy as np
 import discord
 
+# Initialize logger first
+log = logging.getLogger("red.realtalk.capture")
+
 # Optional dependency: discord-ext-voice-recv (third-party)
 try:
     from discord.ext import voice_recv as _voice_recv  # type: ignore
     VOICE_RECV_AVAILABLE = True
-except Exception:
+    log.info("discord-ext-voice-recv imported successfully")
+except ImportError as e:
     _voice_recv = None  # type: ignore
     VOICE_RECV_AVAILABLE = False
+    log.warning(f"discord-ext-voice-recv not available: {e}")
+except Exception as e:
+    _voice_recv = None  # type: ignore
+    VOICE_RECV_AVAILABLE = False
+    log.error(f"Unexpected error importing discord-ext-voice-recv: {e}")
 
 from .realtime import RealtimeClient
-
-log = logging.getLogger("red.realtalk.capture")
 
 
 class VoiceCapture:
@@ -84,8 +91,12 @@ class VoiceCapture:
         try:
             if not VOICE_RECV_AVAILABLE:
                 raise RuntimeError(
-                    "discord-ext-voice-recv is not installed. Install it with: "
-                    "[p]pip install \"git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git\""
+                    "discord-ext-voice-recv is not available. This dependency should have been "
+                    "installed automatically when you installed this cog. Try:\n"
+                    "1. Restart your bot\n"
+                    "2. Use [p]cog update and [p]cog reload realtalk\n"
+                    "3. If still failing, check the bot logs for import errors\n"
+                    "4. Manual install: [p]pip install discord-ext-voice-recv"
                 )
 
             # Create custom audio sink for better control
