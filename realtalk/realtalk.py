@@ -137,12 +137,7 @@ class RealTalk(red_commands.Cog):
         setup_msg = """
 **RealTalk Setup Instructions**
 
-**1. Install Dependencies:**
-```
-[p]load pip
-[p]pip install "PyNaCl>=1.6.0"
-[p]pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
-```
+**1. Dependencies:** All dependencies are installed automatically when you install this cog.
 
 **2. Set OpenAI API Key:**
 ```
@@ -162,7 +157,7 @@ class RealTalk(red_commands.Cog):
 
 **Troubleshooting:**
 - 4006 errors: Discord infrastructure issue - bot will auto-retry
-- No audio: Make sure voice dependencies are installed and bot is restarted
+- No audio: Make sure bot is restarted after installation
 - Check `[p]realtalk status` for diagnostics
         """.replace("[p]", ctx.clean_prefix)
         
@@ -310,8 +305,8 @@ class RealTalk(red_commands.Cog):
             import discord.ext.voice_recv
             await ctx.send("✅ Voice capture is available (discord-ext-voice-recv installed)")
         except ImportError:
-            await ctx.send("❌ Voice capture not available. Install with:\n"
-                         f"`{ctx.clean_prefix}pip install \"git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git\"`")
+            await ctx.send("❌ Voice capture not available. This dependency should have been installed automatically.\n"
+                         f"Try restarting your bot or use `{ctx.clean_prefix}cog update` and `{ctx.clean_prefix}cog reload realtalk`.")
 
     @realtalk.command(name="set")
     async def set_config(self, ctx: red_commands.Context, key: str, *, value: str):
@@ -341,8 +336,9 @@ class RealTalk(red_commands.Cog):
             import nacl
             import discord.ext.voice_recv
         except ImportError as e:
-            await ctx.send(f"Missing dependencies. Run setup command:\n"
-                         f"`{ctx.clean_prefix}realtalk setup`")
+            await ctx.send(f"Missing dependencies. These should have been installed automatically.\n"
+                         f"Try restarting your bot or use `{ctx.clean_prefix}cog update` and `{ctx.clean_prefix}cog reload realtalk`.\n"
+                         f"For detailed setup: `{ctx.clean_prefix}realtalk setup`")
             return False
             
         return True

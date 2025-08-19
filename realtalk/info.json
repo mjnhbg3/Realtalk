@@ -3,14 +3,15 @@
     "short": "Real-time voice conversation with OpenAI's Realtime API",
     "description": "A Discord cog that enables natural voice conversations with OpenAI's Realtime API. Features two-way audio, automatic error recovery for Discord voice issues, smart speaker detection, conversation interruption support, and comprehensive monitoring.",
     "end_user_data_statement": "This cog does not persistently store end user data. Voice audio is processed in real-time and sent to OpenAI's API for conversation purposes only.",
-    "install_msg": "Thank you for installing RealTalk! \n\n**Setup Required:**\n1. Install dependencies: `[p]load pip` then `[p]pip install \"PyNaCl>=1.5.0\"` AND upgrade discord.py: `[p]pipinstall -U discord.py`\n2. For voice capture, install: `[p]pip install \"git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git\"`\n3. Set OpenAI API key: `[p]set api openai api_key YOUR_KEY`\n4. Restart your bot\n5. Use `[p]realtalk setup` for detailed instructions\n\n**Quick Start:**\nJoin a voice channel and use `[p]realtalk join` to start voice conversations!",
+    "install_msg": "Thank you for installing RealTalk! \n\n**Setup Required:**\n1. All dependencies will be installed automatically\n2. Set OpenAI API key: `[p]set api openai api_key YOUR_KEY`\n3. Restart your bot\n4. Use `[p]realtalk setup` for detailed instructions\n\n**Quick Start:**\nJoin a voice channel and use `[p]realtalk join` to start voice conversations!",
     "author": [
         "RealTalk Development Team"
     ],
     "required_cogs": {},
     "requirements": [
         "PyNaCl>=1.5.0",
-        "websockets>=10.0"
+        "websockets>=10.0",
+        "discord-ext-voice-recv>=0.4.0"
     ],
     "tags": [
         "voice",
