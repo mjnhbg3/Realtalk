@@ -286,8 +286,12 @@ class RealTalk(red_commands.Cog):
             status_lines.append("❌ PyNaCl: Not installed")
             
         try:
-            import discord.ext.voice_recv
-            status_lines.append("✅ discord-ext-voice-recv: Available")
+            # Use the working import method
+            voice_recv_module = __import__('voice_recv')
+            if hasattr(voice_recv_module, 'VoiceRecvClient'):
+                status_lines.append("✅ discord-ext-voice-recv: Available")
+            else:
+                status_lines.append("❌ discord-ext-voice-recv: Missing components")
         except ImportError:
             status_lines.append("❌ discord-ext-voice-recv: Not installed")
             
