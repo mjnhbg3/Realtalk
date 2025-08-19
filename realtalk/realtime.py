@@ -57,14 +57,20 @@ class RealtimeClient:
         # Audio streaming
         self.audio_queue = asyncio.Queue(maxsize=100)  # Backpressure handling
         self.audio_task: Optional[asyncio.Task] = None
+        self._last_audio_sent_ts: float = 0.0
+        self._awaiting_commit: bool = False
         
         # Session state
         self.session_config = {
             "modalities": ["text", "audio"],
             "instructions": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
             "voice": "alloy",
-            "input_audio_format": "pcm16", 
+            # Explicit audio formats & sample rates so server VAD interprets input correctly
+            "input_audio_format": "pcm16",
+            "input_audio_sample_rate": 48000,
+            "input_audio_channels": 1,
             "output_audio_format": "pcm16",
+            "output_audio_sample_rate": 24000,
             "input_audio_transcription": {
                 "model": "whisper-1"
             },
@@ -171,6 +177,7 @@ class RealtimeClient:
                     pass
                     
             await self.audio_queue.put(audio_data)
+            self._awaiting_commit = True
             
         except Exception as e:
             log.error(f"Error queuing audio data: {e}")
@@ -180,16 +187,25 @@ class RealtimeClient:
         while self.connected:
             try:
                 # Get audio data with timeout to prevent blocking
-                audio_data = await asyncio.wait_for(
-                    self.audio_queue.get(), 
-                    timeout=1.0
-                )
-                
+                try:
+                    audio_data = await asyncio.wait_for(self.audio_queue.get(), timeout=0.3)
+                except asyncio.TimeoutError:
+                    audio_data = None
+
                 if audio_data and self.session_active:
                     await self._send_audio_chunk(audio_data)
-                    
-            except asyncio.TimeoutError:
-                continue
+                    self._last_audio_sent_ts = time.time()
+                else:
+                    # If we've been quiet for > silence_duration_ms and there is pending audio, auto-commit
+                    if self._awaiting_commit and self.session_active:
+                        now = time.time()
+                        silence_ms = self.session_config.get("turn_detection", {}).get("silence_duration_ms", 300)
+                        if self._last_audio_sent_ts and (now - self._last_audio_sent_ts) * 1000.0 > (silence_ms + 100):
+                            try:
+                                await self.commit_audio_buffer()
+                                await self.create_response()
+                            finally:
+                                self._awaiting_commit = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -206,7 +222,7 @@ class RealtimeClient:
             }
             await self._send_message(message)
             try:
-                log.debug(f"Queued audio chunk to API: {len(audio_data)} bytes")
+                log.info(f"Queued audio chunk to API: {len(audio_data)} bytes")
             except Exception:
                 pass
             
