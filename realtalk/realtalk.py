@@ -427,12 +427,9 @@ class RealTalk(red_commands.Cog):
         await ctx.send("**Voice Capture Debug Info:**\n```\n" + "\n".join(debug_info) + "\n```")
 
     @realtalk.command(name="set")
+    @checks.is_owner()
     async def set_config(self, ctx: red_commands.Context, key: str, *, value: str):
         """Set configuration values."""
-        if not await checks.is_owner(ctx):
-            await ctx.send("Only the bot owner can modify configuration.")
-            return
-            
         if key == "key":
             await self.config.openai_api_key.set(value)
             await ctx.send("OpenAI API key updated.")
