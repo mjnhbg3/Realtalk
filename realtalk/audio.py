@@ -29,17 +29,36 @@ def load_opus_lib() -> bool:
         if discord.opus.is_loaded():
             log.info("Opus library already loaded")
             return True
-            
-        # Try to load Opus
-        discord.opus.load_opus('opus')
-        
+
+        # Try the discord.py default loader (works on Windows when bundled)
+        try:
+            discord.opus._load_default()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         if discord.opus.is_loaded():
-            log.info("Opus library loaded successfully")
+            log.info("Opus library loaded via _load_default()")
             return True
-        else:
-            log.error("Failed to load Opus library - is_loaded() returned False")
-            return False
-            
+
+        # Try common library names across platforms
+        candidates = [
+            'opus',           # generic
+            'libopus-0',      # Windows/MSYS
+            'opus.dll',       # Windows dll
+            'libopus',        # macOS/Homebrew, Linux
+        ]
+        for name in candidates:
+            try:
+                discord.opus.load_opus(name)
+                if discord.opus.is_loaded():
+                    log.info(f"Opus library loaded successfully via '{name}'")
+                    return True
+            except Exception:
+                continue
+
+        log.error("Failed to load Opus library - is_loaded() returned False")
+        return False
+
     except Exception as e:
         log.error(f"Error loading Opus library: {e}")
         log.error("Make sure libopus is installed on your system:")

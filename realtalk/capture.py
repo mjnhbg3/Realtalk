@@ -567,6 +567,13 @@ class VoiceCapture:
         self.last_audio_time[user_id] = now
         self.speaking_users.add(user_id)
 
+        # Light logging for first buffers
+        if len(self.audio_buffer[user_id]) <= 3:
+            try:
+                log.info(f"Buffered audio for user {user_id}: chunk {len(audio_data)} bytes, total chunks {len(self.audio_buffer[user_id])}")
+            except Exception:
+                pass
+
         # Prevent memory buildup
         if len(self.audio_buffer[user_id]) > 200:  # ~4 seconds at 50fps
             self.audio_buffer[user_id] = self.audio_buffer[user_id][-100:]
@@ -616,6 +623,7 @@ if VOICE_RECV_AVAILABLE and _voice_recv is not None:  # pragma: no cover - runti
         def __init__(self, capture: VoiceCapture):
             super().__init__()
             self.capture = capture
+            self._frames_logged = 0
 
         def wants_opus(self) -> bool:
             """Return False to receive decoded PCM audio data instead of opus packets."""
@@ -634,6 +642,13 @@ if VOICE_RECV_AVAILABLE and _voice_recv is not None:  # pragma: no cover - runti
 
                 if not pcm:
                     return
+
+                if self._frames_logged < 5:
+                    try:
+                        log.info(f"Sink received PCM: {len(pcm)} bytes")
+                    except Exception:
+                        pass
+                    self._frames_logged += 1
 
                 # Determine a stable key for the speaker
                 user_id: Optional[int] = None
