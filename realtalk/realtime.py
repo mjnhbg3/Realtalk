@@ -92,10 +92,18 @@ class RealtimeClient:
             try:
                 log.info(f"Connecting to OpenAI Realtime API (attempt {attempt + 1}/{self.reconnect_attempts})")
                 
-                self.websocket = await asyncio.wait_for(
-                    websockets.connect(url, extra_headers=headers),
-                    timeout=self.connection_timeout
-                )
+                # Try different header parameter names for websockets compatibility
+                try:
+                    self.websocket = await asyncio.wait_for(
+                        websockets.connect(url, extra_headers=headers),
+                        timeout=self.connection_timeout
+                    )
+                except TypeError:
+                    # Fallback for newer websockets versions
+                    self.websocket = await asyncio.wait_for(
+                        websockets.connect(url, additional_headers=headers),
+                        timeout=self.connection_timeout
+                    )
                 
                 self.connected = True
                 log.info("Successfully connected to OpenAI Realtime API")

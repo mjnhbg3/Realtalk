@@ -570,6 +570,10 @@ if VOICE_RECV_AVAILABLE and _voice_recv is not None:  # pragma: no cover - runti
             super().__init__()
             self.capture = capture
 
+        def wants_opus(self) -> bool:
+            """Return False to receive decoded PCM audio data instead of opus packets."""
+            return False
+
         def write(self, data: bytes, user: discord.User) -> None:  # signature from voice-recv
             try:
                 user_id = getattr(user, "id", None)
