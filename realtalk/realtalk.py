@@ -84,7 +84,7 @@ class RealTalk(red_commands.Cog):
 ```
 [p]load pip
 [p]pip install "PyNaCl>=1.6.0"
-[p]pip install discord-ext-voice-recv
+[p]pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
 ```
 
 **2. Set OpenAI API Key:**
@@ -254,7 +254,7 @@ class RealTalk(red_commands.Cog):
             await ctx.send("✅ Voice capture is available (discord-ext-voice-recv installed)")
         except ImportError:
             await ctx.send("❌ Voice capture not available. Install with:\n"
-                         f"`{ctx.clean_prefix}pip install discord-ext-voice-recv`")
+                         f"`{ctx.clean_prefix}pip install \"git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git\"`")
 
     @realtalk.command(name="set")
     async def set_config(self, ctx: red_commands.Context, key: str, *, value: str):

@@ -14,7 +14,7 @@ This cog requires additional dependencies that need to be installed before loadi
 2. Install required dependencies:
    ```
    [p]pip install "PyNaCl>=1.6.0"
-   [p]pip install discord-ext-voice-recv
+   [p]pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
    ```
 
 3. Restart your bot to ensure dependencies are loaded properly.
@@ -29,7 +29,7 @@ This cog requires additional dependencies that need to be installed before loadi
 If you have direct access to your bot's Python environment:
 
 ```bash
-pip install "PyNaCl>=1.6.0" discord-ext-voice-recv
+pip install "PyNaCl>=1.6.0" "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
 ```
 
 Then restart your bot and load the cog.
@@ -56,11 +56,11 @@ Then restart your bot and load the cog.
 ### Audio Capture Not Working
 - Install voice capture dependencies:
   ```
-  [p]pip install discord-ext-voice-recv
+  [p]pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
   ```
-  OR
+  OR if using Pycord:
   ```
-  [p]pip install -U git+https://github.com/Ext-Creators/discord-ext-sinks.git
+  [p]pip install -U py-cord
   ```
 - Restart your bot after installation
 

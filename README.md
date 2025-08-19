@@ -16,7 +16,8 @@ A Red-DiscordBot cog that enables real-time voice conversations with OpenAI's Re
 1. **Install dependencies** (see [INSTALLATION.md](INSTALLATION.md) for details):
    ```
    [p]load pip
-   [p]pip install "PyNaCl>=1.6.0" discord-ext-voice-recv
+   [p]pip install "PyNaCl>=1.6.0"
+   [p]pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"
    ```
 
 2. **Set OpenAI API key**:
@@ -47,7 +48,9 @@ A Red-DiscordBot cog that enables real-time voice conversations with OpenAI's Re
 - Python 3.8+
 - OpenAI API key with Realtime API access
 - PyNaCl >= 1.6.0 (for Discord voice protocol v8)
-- discord-ext-voice-recv (for audio capture)
+- For audio capture, choose one:
+  - discord-ext-voice-recv: `pip install "git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git"`
+  - OR Pycord (includes built-in sinks): `pip install -U py-cord`
 
 ## Technical Details
 
