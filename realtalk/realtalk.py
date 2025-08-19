@@ -444,27 +444,86 @@ class RealTalk(red_commands.Cog):
             
         await ctx.send("**Voice Capture Debug Info:**\n```\n" + "\n".join(debug_info) + "\n```")
 
-    @realtalk.command(name="set")
+    @realtalk.group(name="set")
     @checks.is_owner()
-    async def set_config(self, ctx: red_commands.Context, key: str, *, value: str):
-        """Set configuration values."""
-        if key == "key":
-            await self.config.openai_api_key.set(value)
-            await ctx.send("OpenAI API key updated.")
-        elif key == "model":
-            await self.config.realtime_model.set(value)
-            await ctx.send(f"Realtime model set to `{value}`. Rejoin voice to apply.")
-        elif key == "threshold":
-            try:
-                val = float(value)
-                if not (0.0001 <= val <= 1.0):
-                    raise ValueError
-                await self.config.audio_threshold.set(val)
-                await ctx.send(f"Audio activity threshold set to {val}. Rejoin voice to apply.")
-            except ValueError:
-                await ctx.send("Invalid threshold. Use a number between 0.0001 and 1.0, e.g. 0.001")
-        else:
-            await ctx.send(f"Unknown configuration key: {key}")
+    async def set_group(self, ctx: red_commands.Context):
+        """Configure RealTalk options.
+
+        Use subcommands to adjust specific settings. For example:
+        - model: Set realtime model (e.g., gpt-4o-mini-realtime-preview)
+        - voice: Set TTS voice (Alloy, Ash, Ballad, Coral, Echo, Sage, Shimmer, Verse)
+        - vad: Configure server VAD (threshold, silence ms)
+        - threshold: Set local audio activity threshold (0.0001–1.0)
+        - noise: Set local noise reduction (none, near, far)
+        - mix: Enable/disable multi-speaker mixing
+        - transcribe: Set input transcription model (gpt-4o-mini-transcribe or none)
+        """
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
+
+    @set_group.command(name="model")
+    async def set_model(self, ctx: red_commands.Context, *, model: str):
+        """Set the realtime model (e.g., gpt-4o-mini-realtime-preview)."""
+        await self.config.realtime_model.set(model)
+        await ctx.send(f"Realtime model set to `{model}`. Rejoin voice to apply.")
+
+    @set_group.command(name="voice")
+    async def set_voice(self, ctx: red_commands.Context, *, voice: str):
+        """Set the TTS voice: Alloy, Ash, Ballad, Coral, Echo, Sage, Shimmer, Verse."""
+        allowed = {v.lower() for v in ["Alloy","Ash","Ballad","Coral","Echo","Sage","Shimmer","Verse"]}
+        v = voice.strip().lower()
+        if v not in allowed:
+            await ctx.send("Invalid voice. Choose from: Alloy, Ash, Ballad, Coral, Echo, Sage, Shimmer, Verse")
+            return
+        # Save in realtime client session config on next connect via context config cache
+        # We store in bot-wide memory via config shared
+        await self.bot._config.custom("realtalk").voice.set(voice.title())  # type: ignore[attr-defined]
+        await ctx.send(f"Voice set to `{voice.title()}`. Rejoin voice to apply.")
+
+    @set_group.command(name="threshold")
+    async def set_threshold(self, ctx: red_commands.Context, value: float):
+        """Set local audio activity threshold (0.0001–1.0). Lower = more sensitive."""
+        if not (0.0001 <= value <= 1.0):
+            await ctx.send("Invalid threshold. Use a number between 0.0001 and 1.0, e.g. 0.001")
+            return
+        await self.config.audio_threshold.set(value)
+        await ctx.send(f"Audio activity threshold set to {value}. Rejoin voice to apply.")
+
+    @set_group.command(name="vad")
+    async def set_vad(self, ctx: red_commands.Context, threshold: float, silence_ms: int = 300):
+        """Set server VAD threshold (0–1) and silence duration (ms)."""
+        if not (0.0 <= threshold <= 1.0) or silence_ms < 50 or silence_ms > 3000:
+            await ctx.send("Invalid values. threshold 0..1, silence 50..3000 ms")
+            return
+        # Store in a separate place
+        await self.bot._config.custom("realtalk").server_vad.set({"threshold": threshold, "silence_ms": silence_ms})  # type: ignore[attr-defined]
+        await ctx.send(f"Server VAD set: threshold={threshold}, silence={silence_ms}ms. Applied on next session.")
+
+    @set_group.command(name="noise")
+    async def set_noise(self, ctx: red_commands.Context, mode: str):
+        """Set noise reduction: none, near, or far."""
+        m = mode.strip().lower()
+        if m not in {"none","near","far"}:
+            await ctx.send("Invalid mode. Choose from: none, near, far")
+            return
+        await self.bot._config.custom("realtalk").noise.set(m)  # type: ignore[attr-defined]
+        await ctx.send(f"Noise reduction set to `{m}`. Rejoin voice to apply.")
+
+    @set_group.command(name="mix")
+    async def set_mix(self, ctx: red_commands.Context, enabled: bool):
+        """Enable or disable multi-speaker mixing (true/false)."""
+        await self.bot._config.custom("realtalk").mix.set(bool(enabled))  # type: ignore[attr-defined]
+        await ctx.send(f"Multi-speaker mixing {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
+
+    @set_group.command(name="transcribe")
+    async def set_transcribe(self, ctx: red_commands.Context, *, model: str):
+        """Set input transcription model: gpt-4o-mini-transcribe or none."""
+        m = model.strip().lower()
+        if m not in {"gpt-4o-mini-transcribe","none"}:
+            await ctx.send("Invalid model. Use 'gpt-4o-mini-transcribe' or 'none'")
+            return
+        await self.bot._config.custom("realtalk").transcribe.set(m)  # type: ignore[attr-defined]
+        await ctx.send(f"Transcription model set to `{m}`. Rejoin voice to apply.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
@@ -610,10 +669,31 @@ class RealTalk(red_commands.Cog):
         api_key = await self._get_openai_api_key()
         
         try:
-            # Initialize Realtime client
-            # Initialize Realtime client with configured model
+            # Initialize Realtime client with configured model and options
             model_name = await self.config.realtime_model()
-            realtime_client = RealtimeClient(api_key, model=model_name)
+            # Optional settings from custom section
+            voice_name = None
+            transcribe_model = None
+            server_vad = None
+            noise_mode = None
+            mix_enabled = True
+            try:
+                store = self.bot._config.custom("realtalk")  # type: ignore[attr-defined]
+                voice_name = await store.voice()  # type: ignore
+                transcribe_model = await store.transcribe()  # type: ignore
+                server_vad = await store.server_vad()  # type: ignore
+                noise_mode = await store.noise()  # type: ignore
+                mix_enabled = await store.mix()  # type: ignore
+            except Exception:
+                pass
+
+            realtime_client = RealtimeClient(
+                api_key,
+                model=model_name,
+                voice=voice_name,
+                transcribe=transcribe_model or "gpt-4o-mini-transcribe",
+                server_vad=server_vad,
+            )
             
             # Initialize voice capture
             voice_capture = VoiceCapture(
@@ -622,6 +702,22 @@ class RealTalk(red_commands.Cog):
                 audio_threshold=await self.config.audio_threshold(),
                 silence_threshold=await self.config.silence_threshold()
             )
+            # Apply noise mode and mixing
+            try:
+                if noise_mode == "none":
+                    voice_capture.set_noise_gate(False)
+                elif noise_mode == "near":
+                    voice_capture.set_noise_gate(True)
+                    voice_capture.noise_floor_adaptation_rate = 0.002
+                elif noise_mode == "far":
+                    voice_capture.set_noise_gate(True)
+                    voice_capture.noise_floor_adaptation_rate = 0.0005
+            except Exception:
+                pass
+            try:
+                voice_capture.set_speaker_mixing(bool(mix_enabled))
+            except Exception:
+                pass
             
             # Initialize audio source for bot speech
             audio_source = PCMQueueAudioSource()

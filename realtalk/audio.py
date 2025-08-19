@@ -114,6 +114,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         # Performance monitoring
         self.last_stats_time = time.time()
         self.underrun_count = 0
+        self._leftover: bytes = b""
         
         log.info(f"PCM Audio Source initialized: {sample_rate}Hz, {channels}ch, {frame_size} samples/frame")
 
@@ -180,40 +181,62 @@ class PCMQueueAudioSource(discord.AudioSource):
             return
             
         try:
-            # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord
+            # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord using linear upsampling
             processed_data = self._to_48k_stereo(audio_data)
-            
-            # Split into frames
-            frames = self._split_into_frames(processed_data)
-            
+
+            # Accumulate data to produce exact frame-sized chunks (avoid crackles between deltas)
             with self.queue_lock:
-                for frame in frames:
+                buffer = self._leftover + processed_data
+                frame_bytes = self.frame_size * self.channels * 2
+
+                idx = 0
+                buflen = len(buffer)
+                while idx + frame_bytes <= buflen:
+                    frame = buffer[idx: idx + frame_bytes]
+                    idx += frame_bytes
+
                     if len(self.audio_queue) >= self.max_queue_size:
-                        # Queue is full - drop oldest frame to prevent latency buildup
+                        # Drop oldest to avoid latency buildup
                         self.audio_queue.popleft()
                         self.frames_dropped += 1
-                        
+
                     self.audio_queue.append(frame)
                     self.frames_queued += 1
+
+                # Keep leftover for next call
+                self._leftover = buffer[idx:]
                     
         except Exception as e:
             log.error(f"Error adding audio to queue: {e}")
 
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
-        """Convert PCM16 to 48kHz stereo expected by Discord.
+        """Convert 24kHz mono PCM16 to 48kHz stereo with linear interpolation.
 
-        Assumes incoming is 24kHz mono (OpenAI default for pcm16) and upsamples by 2x.
+        This reduces crackle compared to zero-order hold and maintains continuity
+        by performing upsampling before framing with a persistent leftover buffer.
         """
         try:
             if not audio_data:
                 return audio_data
 
-            mono = np.frombuffer(audio_data, dtype=np.int16)
-            # Upsample 24k -> 48k by repeating samples (zero-order hold)
-            upsampled = np.repeat(mono, 2)
-            # Duplicate to stereo (interleave LR)
-            stereo = np.column_stack((upsampled, upsampled)).reshape(-1).astype(np.int16)
-            return stereo.tobytes()
+            mono = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            if mono.size == 0:
+                return b""
+
+            # Linear interpolation 2x: insert an average sample between each pair
+            up_len = mono.size * 2
+            up = np.empty(up_len, dtype=np.float32)
+            up[0::2] = mono
+            # For the inserted samples, average with previous sample; for the last sample, repeat
+            up[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
+            up[-1] = mono[-1]
+
+            # Duplicate to stereo (L=R)
+            stereo = np.column_stack((up, up)).reshape(-1)
+
+            # Cast back to int16 with clipping
+            np.clip(stereo, -32768, 32767, out=stereo)
+            return stereo.astype(np.int16).tobytes()
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
             return audio_data

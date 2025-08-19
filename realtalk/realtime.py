@@ -35,7 +35,7 @@ class RealtimeClient:
     - Connection management with timeouts and retries
     """
 
-    def __init__(self, api_key: str, model: Optional[str] = None):
+    def __init__(self, api_key: str, model: Optional[str] = None, voice: Optional[str] = None, transcribe: Optional[str] = None, server_vad: Optional[Dict[str, Any]] = None):
         self.api_key = api_key
         self.model = model or "gpt-4o-realtime-preview-2024-10-01"
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
@@ -68,18 +68,16 @@ class RealtimeClient:
         self.session_config = {
             "modalities": ["text", "audio"],
             "instructions": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
-            "voice": "alloy",
+            "voice": (voice or "Alloy").lower(),
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             # Note: Realtime API currently infers sample rates; we downsample input to 24k
-            "input_audio_transcription": {
-                "model": "whisper-1"
-            },
+            **({"input_audio_transcription": {"model": transcribe}} if transcribe and transcribe != "none" else {}),
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": 0.5,
+                "threshold": (server_vad or {}).get("threshold", 0.5),
                 "prefix_padding_ms": 300,
-                "silence_duration_ms": 300  # Reduced from 500ms for lower latency
+                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300)
             },
             "tools": [],
             "tool_choice": "auto",

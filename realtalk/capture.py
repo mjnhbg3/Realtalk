@@ -314,18 +314,14 @@ class VoiceCapture:
             # Convert to numpy array for processing (PCM16)
             audio_array = np.frombuffer(raw_audio, dtype=np.int16)
 
-            # Handle stereo-to-mono only if input declared as stereo
-            if self.channels == 2:
-                # Ensure even sample count for LR pairs
-                if audio_array.size % 2 != 0:
-                    audio_array = audio_array[:-1]
-                if audio_array.size:
+            # Mix stereo to mono if data appears interleaved LR
+            if audio_array.size >= 2 and audio_array.size % 2 == 0:
+                try:
                     stereo_audio = audio_array.reshape(-1, 2)
                     mono_audio = stereo_audio.mean(axis=1).astype(np.int16)
-                else:
+                except Exception:
                     mono_audio = audio_array
             else:
-                # Treat as mono
                 mono_audio = audio_array
 
             # Apply noise gate
