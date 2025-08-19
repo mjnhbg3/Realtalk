@@ -134,7 +134,7 @@ class VoiceCapture:
         audio_threshold: float = 0.01,
         silence_threshold: int = 300,  # milliseconds
         sample_rate: int = 48000,
-        channels: int = 2,
+        channels: int = 1,
         frame_size: int = 960,  # 20ms at 48kHz
     ):
         self.voice_client = voice_client
@@ -311,16 +311,21 @@ class VoiceCapture:
             if len(raw_audio) < 4:  # Minimum audio data
                 return None
 
-            # Convert to numpy array for processing
-            # Discord audio is 16-bit signed PCM, stereo, 48kHz
+            # Convert to numpy array for processing (PCM16)
             audio_array = np.frombuffer(raw_audio, dtype=np.int16)
 
-            # Handle stereo to mono conversion
-            if len(audio_array) % 2 == 0:  # Stereo
-                # Reshape to stereo pairs and mix to mono
-                stereo_audio = audio_array.reshape(-1, 2)
-                mono_audio = np.mean(stereo_audio, axis=1, dtype=np.int16)
+            # Handle stereo-to-mono only if input declared as stereo
+            if self.channels == 2:
+                # Ensure even sample count for LR pairs
+                if audio_array.size % 2 != 0:
+                    audio_array = audio_array[:-1]
+                if audio_array.size:
+                    stereo_audio = audio_array.reshape(-1, 2)
+                    mono_audio = stereo_audio.mean(axis=1).astype(np.int16)
+                else:
+                    mono_audio = audio_array
             else:
+                # Treat as mono
                 mono_audio = audio_array
 
             # Apply noise gate

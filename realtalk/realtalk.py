@@ -47,7 +47,7 @@ class RealTalk(red_commands.Cog):
             "max_retry_attempts": 5,
             "retry_base_delay": 2.0,
             "voice_timeout": 30.0,
-            "audio_threshold": 0.01,
+            "audio_threshold": 0.001,
             "silence_threshold": 300,  # 300ms for reduced latency
         }
         
@@ -436,6 +436,15 @@ class RealTalk(red_commands.Cog):
         elif key == "model":
             await self.config.realtime_model.set(value)
             await ctx.send(f"Realtime model set to `{value}`. Rejoin voice to apply.")
+        elif key == "threshold":
+            try:
+                val = float(value)
+                if not (0.0001 <= val <= 1.0):
+                    raise ValueError
+                await self.config.audio_threshold.set(val)
+                await ctx.send(f"Audio activity threshold set to {val}. Rejoin voice to apply.")
+            except ValueError:
+                await ctx.send("Invalid threshold. Use a number between 0.0001 and 1.0, e.g. 0.001")
         else:
             await ctx.send(f"Unknown configuration key: {key}")
 
