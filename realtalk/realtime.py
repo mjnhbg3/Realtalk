@@ -35,8 +35,9 @@ class RealtimeClient:
     - Connection management with timeouts and retries
     """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: Optional[str] = None):
         self.api_key = api_key
+        self.model = model or "gpt-4o-realtime-preview-2024-10-01"
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
         self.connected = False
         self.session_active = False
@@ -88,7 +89,7 @@ class RealtimeClient:
 
     async def connect(self) -> bool:
         """Connect to OpenAI Realtime API with retry logic."""
-        url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+        url = f"wss://api.openai.com/v1/realtime?model={self.model}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "OpenAI-Beta": "realtime=v1"

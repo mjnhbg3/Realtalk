@@ -43,6 +43,7 @@ class RealTalk(red_commands.Cog):
         # Configuration schema
         default_global = {
             "openai_api_key": None,
+            "realtime_model": "gpt-4o-realtime-preview-2024-10-01",
             "max_retry_attempts": 5,
             "retry_base_delay": 2.0,
             "voice_timeout": 30.0,
@@ -232,6 +233,12 @@ class RealTalk(red_commands.Cog):
         
         # Basic status
         status_lines = ["**RealTalk Status**", ""]
+
+        # Model in use
+        try:
+            status_lines.append(f"Model: `{await self.config.realtime_model()}`")
+        except Exception:
+            pass
         
         # API key status
         api_key = await self._get_openai_api_key()
@@ -429,6 +436,9 @@ class RealTalk(red_commands.Cog):
         if key == "key":
             await self.config.openai_api_key.set(value)
             await ctx.send("OpenAI API key updated.")
+        elif key == "model":
+            await self.config.realtime_model.set(value)
+            await ctx.send(f"Realtime model set to `{value}`. Rejoin voice to apply.")
         else:
             await ctx.send(f"Unknown configuration key: {key}")
 
@@ -577,7 +587,9 @@ class RealTalk(red_commands.Cog):
         
         try:
             # Initialize Realtime client
-            realtime_client = RealtimeClient(api_key)
+            # Initialize Realtime client with configured model
+            model_name = await self.config.realtime_model()
+            realtime_client = RealtimeClient(api_key, model=model_name)
             
             # Initialize voice capture
             voice_capture = VoiceCapture(
