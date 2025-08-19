@@ -301,9 +301,14 @@ class RealTalk(red_commands.Cog):
     @sinks_command.command(name="status")
     async def sinks_status(self, ctx: red_commands.Context):
         """Check voice capture availability."""
+        # Use the same working import method as capture.py
         try:
-            import discord.ext.voice_recv
-            await ctx.send("✅ Voice capture is available (discord-ext-voice-recv installed)")
+            # Try the working import method
+            voice_recv_module = __import__('voice_recv')
+            if hasattr(voice_recv_module, 'VoiceRecvClient'):
+                await ctx.send("✅ Voice capture is available (discord-ext-voice-recv installed)")
+            else:
+                await ctx.send("❌ Voice capture module imported but missing required components")
         except ImportError as e:
             await ctx.send(f"❌ Voice capture not available: {e}\n"
                          f"This dependency should have been installed automatically.\n"
@@ -436,7 +441,10 @@ class RealTalk(red_commands.Cog):
         # Check voice dependencies
         try:
             import nacl
-            import discord.ext.voice_recv
+            # Use the working import method
+            voice_recv_module = __import__('voice_recv')
+            if not hasattr(voice_recv_module, 'VoiceRecvClient'):
+                raise ImportError("voice_recv module missing VoiceRecvClient")
         except ImportError as e:
             await ctx.send(f"Missing dependencies. These should have been installed automatically.\n"
                          f"Try restarting your bot or use `{ctx.clean_prefix}cog update` and `{ctx.clean_prefix}cog reload realtalk`.\n"
