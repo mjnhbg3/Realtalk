@@ -497,6 +497,20 @@ class RealTalk(red_commands.Cog):
         await self.config.system_prompt.set(text)
         await ctx.send("System prompt updated. Rejoin voice to apply.")
 
+    @realtalk.group(name="show")
+    async def show_group(self, ctx: red_commands.Context):
+        """Show current RealTalk configuration values."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
+
+    @show_group.command(name="prompt")
+    async def show_prompt(self, ctx: red_commands.Context):
+        """Show the current system prompt used for the session."""
+        prompt = await self.config.system_prompt()
+        if not prompt:
+            prompt = "(empty)"
+        await ctx.send(f"Current system prompt:\n{box(prompt)}")
+
     @set_group.command(name="threshold")
     async def set_threshold(self, ctx: red_commands.Context, value: float):
         """Set local audio activity threshold (0.0001–1.0). Lower = more sensitive."""
