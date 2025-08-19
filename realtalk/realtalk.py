@@ -51,6 +51,7 @@ class RealTalk(red_commands.Cog):
             "silence_threshold": 300,  # 300ms for reduced latency
             # New configurable options
             "voice": "Alloy",
+            "system_prompt": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
             "server_vad_threshold": 0.5,
             "server_vad_silence_ms": 300,
             "transcribe_model": "gpt-4o-mini-transcribe",
@@ -486,6 +487,16 @@ class RealTalk(red_commands.Cog):
         await self.config.voice.set(voice.title())
         await ctx.send(f"Voice set to `{voice.title()}`. Rejoin voice to apply.")
 
+    @set_group.command(name="prompt")
+    async def set_prompt(self, ctx: red_commands.Context, *, prompt: str):
+        """Set the system prompt (instructions) sent to the model."""
+        text = prompt.strip()
+        if not text:
+            await ctx.send("Prompt cannot be empty.")
+            return
+        await self.config.system_prompt.set(text)
+        await ctx.send("System prompt updated. Rejoin voice to apply.")
+
     @set_group.command(name="threshold")
     async def set_threshold(self, ctx: red_commands.Context, value: float):
         """Set local audio activity threshold (0.0001–1.0). Lower = more sensitive."""
@@ -699,6 +710,7 @@ class RealTalk(red_commands.Cog):
                 voice=voice_name,
                 transcribe=transcribe_model,
                 server_vad=server_vad,
+                instructions=await self.config.system_prompt(),
             )
             
             # Initialize voice capture

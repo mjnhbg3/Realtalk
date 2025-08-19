@@ -35,7 +35,7 @@ class RealtimeClient:
     - Connection management with timeouts and retries
     """
 
-    def __init__(self, api_key: str, model: Optional[str] = None, voice: Optional[str] = None, transcribe: Optional[str] = None, server_vad: Optional[Dict[str, Any]] = None):
+    def __init__(self, api_key: str, model: Optional[str] = None, voice: Optional[str] = None, transcribe: Optional[str] = None, server_vad: Optional[Dict[str, Any]] = None, instructions: Optional[str] = None):
         self.api_key = api_key
         self.model = model or "gpt-4o-realtime-preview-2024-10-01"
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
@@ -67,7 +67,7 @@ class RealtimeClient:
         # Session state
         self.session_config = {
             "modalities": ["text", "audio"],
-            "instructions": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
+            "instructions": instructions or "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
             "voice": (voice or "Alloy").lower(),
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
