@@ -448,6 +448,10 @@ class VoiceCapture:
                     mixed_24k = self._downsample_48k_to_24k_mono(mixed_audio)
                     if mixed_24k:
                         await self.realtime_client.send_audio(mixed_24k)
+                        try:
+                            log.info(f"Sent mixed audio chunk: {len(mixed_24k)} bytes (24kHz mono)")
+                        except Exception:
+                            pass
 
         except Exception as e:
             log.error(f"Error sending mixed audio: {e}")
@@ -458,28 +462,20 @@ class VoiceCapture:
             return None
 
     def _downsample_48k_to_24k_mono(self, audio_data: bytes) -> Optional[bytes]:
-        """Downsample 48kHz mono PCM16 to 24kHz mono by averaging pairs.
+        """Downsample 48kHz PCM16 (mono) to 24kHz by averaging pairs and decimating.
 
-        Assumes input is PCM16 mono. If stereo is passed, collapses to mono first.
+        The upstream pipeline already converts to mono; we always treat input as mono here.
         """
         try:
             if not audio_data:
                 return audio_data
 
-            arr = np.frombuffer(audio_data, dtype=np.int16)
-
-            # If stereo interleaved, mix to mono first
-            if len(arr) % 2 == 0 and self.channels == 2:
-                stereo = arr.reshape(-1, 2)
-                mono = stereo.mean(axis=1).astype(np.int16)
-            else:
-                mono = arr
+            mono = np.frombuffer(audio_data, dtype=np.int16)
 
             # Ensure even length for pairing
             if mono.size % 2 == 1:
                 mono = mono[:-1]
 
-            # Average every two samples: simple antialiasing + decimation by 2
             if mono.size == 0:
                 return b""
 
