@@ -49,6 +49,8 @@ class RealtimeClient:
         self.on_input_audio_buffer_speech_started: Optional[Callable[[], None]] = None
         self.on_input_audio_buffer_speech_stopped: Optional[Callable[[], None]] = None
         self.on_error: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.on_response_started: Optional[Callable[[], None]] = None
+        self.on_response_done: Optional[Callable[[], None]] = None
         
         # Connection management
         self.connection_timeout = 30.0
@@ -331,6 +333,13 @@ class RealtimeClient:
             elif event_type == "session.updated":
                 log.info("Session updated successfully")
                 
+            elif event_type == "response.created":
+                if self.on_response_started:
+                    try:
+                        self.on_response_started()
+                    except Exception:
+                        pass
+
             elif event_type == "input_audio_buffer.speech_started":
                 log.debug("Speech started")
                 if self.on_input_audio_buffer_speech_started:
@@ -377,6 +386,11 @@ class RealtimeClient:
             elif event_type == "response.done":
                 log.debug("Response completed")
                 self._response_active = False
+                if self.on_response_done:
+                    try:
+                        self.on_response_done()
+                    except Exception:
+                        pass
                 
             elif event_type == "error":
                 error_info = event.get("error", {})

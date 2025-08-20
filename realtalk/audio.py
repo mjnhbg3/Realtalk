@@ -115,8 +115,6 @@ class PCMQueueAudioSource(discord.AudioSource):
         self.last_stats_time = time.time()
         self.underrun_count = 0
         self._leftover: bytes = b""
-        self._prev_tail: bytes = b""
-        self._crossfade_samples: int = int(0.005 * self.sample_rate)  # ~5ms
         
         log.info(f"PCM Audio Source initialized: {sample_rate}Hz, {channels}ch, {frame_size} samples/frame")
 
@@ -185,8 +183,6 @@ class PCMQueueAudioSource(discord.AudioSource):
         try:
             # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord using linear upsampling
             processed_data = self._to_48k_stereo(audio_data)
-            # Apply crossfade with previous tail to smooth boundaries
-            processed_data = self._apply_crossfade(processed_data)
 
             # Accumulate data to produce exact frame-sized chunks (avoid crackles between deltas)
             with self.queue_lock:
@@ -245,57 +241,10 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.error(f"Error converting audio to 48k stereo: {e}")
             return audio_data
 
-    def _apply_crossfade(self, stereo_bytes: bytes) -> bytes:
-        """Apply a short crossfade between the previous tail and new data to avoid clicks."""
-        try:
-            if not stereo_bytes:
-                return stereo_bytes
-
-            if not self._prev_tail or self._crossfade_samples <= 0:
-                # Update tail and return
-                tail_len = self._crossfade_samples * self.channels * 2
-                self._prev_tail = stereo_bytes[-tail_len:] if len(stereo_bytes) >= tail_len else stereo_bytes
-                return stereo_bytes
-
-            # Determine crossfade length in bytes
-            fade_len_samples = min(self._crossfade_samples, len(stereo_bytes) // (self.channels * 2), len(self._prev_tail) // (self.channels * 2))
-            if fade_len_samples <= 0:
-                tail_len = self._crossfade_samples * self.channels * 2
-                self._prev_tail = stereo_bytes[-tail_len:] if len(stereo_bytes) >= tail_len else stereo_bytes
-                return stereo_bytes
-
-            fade_len_bytes = fade_len_samples * self.channels * 2
-            # Convert to numpy int16
-            new_arr = np.frombuffer(stereo_bytes, dtype=np.int16).astype(np.int32)
-            prev_arr = np.frombuffer(self._prev_tail[-fade_len_bytes:], dtype=np.int16).astype(np.int32)
-
-            # Create linear fade curves
-            fade_in = np.linspace(0.0, 1.0, fade_len_samples, endpoint=False)
-            fade_out = 1.0 - fade_in
-            # Expand for stereo interleaving
-            fade_in_st = np.repeat(fade_in, self.channels)
-            fade_out_st = np.repeat(fade_out, self.channels)
-
-            # Apply crossfade on the first fade_len region
-            mixed = (prev_arr * fade_out_st + new_arr[:fade_len_samples * self.channels] * fade_in_st).astype(np.int32)
-            # Clip and store back
-            np.clip(mixed, -32768, 32767, out=mixed)
-            new_arr[:fade_len_samples * self.channels] = mixed
-
-            # Update prev tail
-            tail_len = self._crossfade_samples * self.channels * 2
-            new_bytes = new_arr.astype(np.int16).tobytes()
-            self._prev_tail = new_bytes[-tail_len:] if len(new_bytes) >= tail_len else new_bytes
-            return new_bytes
-        except Exception as e:
-            log.error(f"Error applying crossfade: {e}")
-            # Fallback: update tail only
-            try:
-                tail_len = self._crossfade_samples * self.channels * 2
-                self._prev_tail = stereo_bytes[-tail_len:] if len(stereo_bytes) >= tail_len else stereo_bytes
-            except Exception:
-                pass
-            return stereo_bytes
+    def reset_state(self):
+        """Reset internal streaming state (used when a new response starts)."""
+        self._leftover = b""
+        self.clear_queue()
 
     def _split_into_frames(self, audio_data: bytes) -> list:
         """Split audio data into Discord-compatible frames."""

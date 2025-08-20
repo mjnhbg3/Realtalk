@@ -820,6 +820,17 @@ class RealTalk(red_commands.Cog):
                     pass
 
             realtime_client.on_audio_output = _handle_audio_output
+            # Reset playback state on response boundaries
+            def _on_resp_start():
+                try:
+                    audio_source.reset_state()
+                except Exception:
+                    pass
+            def _on_resp_done():
+                # No action needed; queue will drain and player will stop
+                pass
+            realtime_client.on_response_started = _on_resp_start
+            realtime_client.on_response_done = _on_resp_done
             
             # Start voice capture
             await voice_capture.start()
