@@ -80,7 +80,8 @@ class RealtimeClient:
                 "type": "server_vad",
                 "threshold": (server_vad or {}).get("threshold", 0.5),
                 "prefix_padding_ms": 300,
-                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300)
+                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300),
+                "create_response": True
             },
             "tools": [],
             "tool_choice": "auto",
@@ -205,13 +206,9 @@ class RealtimeClient:
                     except Exception:
                         pass
                 else:
-                    # Auto-commit only when we have at least 120ms buffered
-                    if self._awaiting_commit and self.session_active and self._buffered_ms >= 120.0:
-                        try:
-                            await self.commit_audio_buffer()
-                            await self.create_response()
-                        finally:
-                            self._awaiting_commit = False
+                    # With server VAD and create_response: true, OpenAI handles everything
+                    if self._awaiting_commit:
+                        self._awaiting_commit = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -357,16 +354,11 @@ class RealtimeClient:
                     log.error(f"Error cancelling response: {e}")
                     
             elif event_type == "input_audio_buffer.speech_stopped":
-                log.debug("Speech stopped")
+                log.debug("Speech stopped - OpenAI will handle response generation")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
-                # Commit audio buffer and trigger response
-                try:
-                    if self._buffered_ms >= 120.0:
-                        await self.commit_audio_buffer()
-                        await self.create_response()
-                except Exception as e:
-                    log.error(f"Error finalizing response after speech: {e}")
+                # With create_response: true, OpenAI automatically commits and generates response
+                self._buffered_ms = 0.0
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
@@ -453,7 +445,8 @@ class RealtimeClient:
             "type": "server_vad",
             "threshold": threshold,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": silence_duration_ms
+            "silence_duration_ms": silence_duration_ms,
+            "create_response": True
         }
         
         if self.session_active:

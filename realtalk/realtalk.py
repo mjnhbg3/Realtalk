@@ -818,24 +818,18 @@ class RealTalk(red_commands.Cog):
                 instructions=await self.config.system_prompt(),
             )
             
-            # Initialize voice capture
+            # Initialize voice capture with minimal local processing
             voice_capture = VoiceCapture(
                 voice_client=voice_client,
                 realtime_client=realtime_client,
-                audio_threshold=await self.config.audio_threshold(),
-                silence_threshold=await self.config.silence_threshold()
+                audio_threshold=0.0,  # Disabled - let OpenAI handle voice detection
+                silence_threshold=100  # Minimal local buffering
             )
-            # Apply noise mode and mixing
+            # Disable local audio processing - let OpenAI handle everything
             try:
-                noise_mode = await self.config.noise_mode()
-                if noise_mode == "none":
-                    voice_capture.set_noise_gate(False)
-                elif noise_mode == "near":
-                    voice_capture.set_noise_gate(True)
-                    voice_capture.noise_floor_adaptation_rate = 0.002
-                elif noise_mode == "far":
-                    voice_capture.set_noise_gate(True)
-                    voice_capture.noise_floor_adaptation_rate = 0.0005
+                # Always disable noise gate - OpenAI has better noise reduction
+                voice_capture.set_noise_gate(False)
+                log.info("Local noise processing disabled - OpenAI will handle audio filtering")
             except Exception:
                 pass
             try:

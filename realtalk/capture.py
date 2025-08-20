@@ -276,27 +276,14 @@ class VoiceCapture:
                 await asyncio.sleep(0.1)
 
     async def _process_user_audio(self, user_id: int, current_time: float):
-        """Update speaking state without consuming buffered audio."""
+        """Simple audio buffer management - let OpenAI handle voice activity detection."""
         if user_id not in self.audio_buffer:
             return
 
+        # Just update last activity time, don't do local voice detection
         audio_chunks = self.audio_buffer[user_id]
-        last_activity = self.last_audio_time.get(user_id, 0)
-
-        # If we have buffered audio, refresh activity and mark speaking
         if audio_chunks:
             self.last_audio_time[user_id] = current_time
-            if user_id not in self.speaking_users:
-                self.speaking_users.add(user_id)
-                log.debug(f"User {user_id} started speaking")
-            # Do not consume chunks here; mixing stage will process them
-            return
-
-        # No chunks: check for silence timeout to mark stop speaking
-        if current_time - last_activity > (self.silence_threshold / 1000.0):
-            if user_id in self.speaking_users:
-                self.speaking_users.discard(user_id)
-                log.debug(f"User {user_id} stopped speaking (silence timeout)")
 
     def _process_audio_chunks(self, chunks: List[bytes], user_id: int) -> Optional[bytes]:
         """Process raw audio chunks with noise filtering and conversion."""
@@ -423,50 +410,98 @@ class VoiceCapture:
             self.primary_speaker = None
 
     async def _send_mixed_audio(self):
-        """Send mixed audio to OpenAI Realtime API."""
-        if not self.speaking_users:
-            return
-
+        """Send simplified audio directly to OpenAI - let OpenAI handle all voice processing."""
+        # Simply send all received audio to OpenAI without local voice activity detection
         try:
-            # Collect audio from active speakers
-            audio_to_mix = []
+            audio_to_send = []
 
-            if self.mix_multiple_speakers:
-                # Mix multiple speakers with priorities
-                for user_id in self.speaking_users:
-                    if user_id in self.audio_buffer:
-                        chunks = self.audio_buffer[user_id]
-                        if chunks:
-                            processed = self._process_audio_chunks(chunks=chunks, user_id=user_id)
-                            if processed:
-                                priority = self.speaker_priority.get(user_id, 1.0)
-                                audio_to_mix.append((processed, priority))
-            else:
-                # Use only primary speaker
-                if self.primary_speaker and self.primary_speaker in self.audio_buffer:
-                    chunks = self.audio_buffer[self.primary_speaker]
+            # Collect ALL audio from ANY users (let OpenAI filter)
+            for user_id in list(self.audio_buffer.keys()):
+                if user_id in self.audio_buffer:
+                    chunks = self.audio_buffer[user_id]
                     if chunks:
-                        processed = self._process_audio_chunks(
-                            chunks=chunks, user_id=self.primary_speaker
-                        )
+                        # Simple processing - just format conversion, no thresholds
+                        processed = self._simple_process_audio_chunks(chunks=chunks, user_id=user_id)
                         if processed:
-                            audio_to_mix.append((processed, 1.0))
+                            audio_to_send.append(processed)
 
-            # Mix audio streams
-            if audio_to_mix:
-                mixed_audio = self._mix_audio_streams(audio_to_mix)
+            # Mix and send if we have any audio
+            if audio_to_send:
+                # Mix multiple streams by averaging
+                mixed_audio = self._simple_mix_audio_streams(audio_to_send)
                 if mixed_audio:
-                    # Downsample 48k -> 24k mono for Realtime API input expectations
+                    # Downsample 48k -> 24k mono for OpenAI
                     mixed_24k = self._downsample_48k_to_24k_mono(mixed_audio)
                     if mixed_24k:
                         await self.realtime_client.send_audio(mixed_24k)
-                        try:
-                            log.info(f"Sent mixed audio chunk: {len(mixed_24k)} bytes (24kHz mono)")
-                        except Exception:
-                            pass
+                        log.debug(f"Sent audio to OpenAI: {len(mixed_24k)} bytes (24kHz mono)")
 
         except Exception as e:
-            log.error(f"Error sending mixed audio: {e}")
+            log.error(f"Error sending audio: {e}")
+
+    def _simple_process_audio_chunks(self, chunks: List[bytes], user_id: int) -> Optional[bytes]:
+        """Simple audio processing - just format conversion, no filtering."""
+        if not chunks:
+            return None
+
+        try:
+            # Combine chunks
+            raw_audio = b"".join(chunks)
+            chunks.clear()  # Clear processed chunks
+
+            if len(raw_audio) < 4:  # Minimum audio data
+                return None
+
+            # Convert to numpy array for processing (PCM16)
+            audio_array = np.frombuffer(raw_audio, dtype=np.int16)
+
+            # Mix stereo to mono if data appears interleaved LR
+            if audio_array.size >= 2 and audio_array.size % 2 == 0:
+                try:
+                    stereo_audio = audio_array.reshape(-1, 2)
+                    mono_audio = stereo_audio.mean(axis=1).astype(np.int16)
+                except Exception:
+                    mono_audio = audio_array
+            else:
+                mono_audio = audio_array
+
+            # Convert back to bytes - NO THRESHOLDS, let OpenAI handle everything
+            processed_audio = mono_audio.astype(np.int16).tobytes()
+            self.frames_processed += 1
+            return processed_audio
+
+        except Exception as e:
+            log.error(f"Error processing audio chunks for user {user_id}: {e}")
+            self.frames_dropped += 1
+            return None
+
+    def _simple_mix_audio_streams(self, audio_streams: List[bytes]) -> Optional[bytes]:
+        """Simple audio mixing - just average multiple streams."""
+        if not audio_streams:
+            return None
+
+        try:
+            # Convert all to numpy arrays
+            arrays = []
+            min_length = float('inf')
+            
+            for audio_data in audio_streams:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                arrays.append(audio_array)
+                min_length = min(min_length, len(audio_array))
+            
+            if min_length == 0:
+                return None
+            
+            # Truncate all arrays to same length and average
+            truncated_arrays = [arr[:min_length] for arr in arrays]
+            mixed = np.mean(truncated_arrays, axis=0).astype(np.int16)
+            
+            return mixed.tobytes()
+
+        except Exception as e:
+            log.error(f"Error mixing audio streams: {e}")
+            return None
 
     def _mix_audio_streams(self, audio_streams: List[tuple]) -> Optional[bytes]:
         """Mix multiple audio streams with weighted priorities."""
