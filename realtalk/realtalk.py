@@ -19,7 +19,7 @@ from redbot.core.utils.chat_formatting import box, humanize_list
 
 from .realtime import RealtimeClient
 from .capture import VoiceCapture
-from .audio import PCMQueueAudioSource, load_opus_lib
+from .audio import PCMQueueAudioSource, RateLimitedAudioSource, load_opus_lib
 
 log = logging.getLogger("red.realtalk")
 
@@ -58,6 +58,9 @@ class RealTalk(red_commands.Cog):
             "noise_mode": "near",  # none|near|far
             "mix_multiple": True,
             "idle_timeout": 60,
+            # Audio rate control settings to prevent Discord timing compensation
+            "audio_rate_limiting": True,  # Enable rate-limited audio delivery
+            "audio_buffer_target_ms": 200,  # Target buffer size for pacing (ms)
         }
         
         default_guild = {
@@ -497,6 +500,46 @@ class RealTalk(red_commands.Cog):
         await self.config.system_prompt.set(text)
         await ctx.send("System prompt updated. Rejoin voice to apply.")
 
+    @realtalk.command(name="ratelimit")
+    async def set_rate_limiting(self, ctx: red_commands.Context, enabled: bool = None, buffer_ms: int = None):
+        """
+        Configure audio rate limiting to prevent Discord timing compensation.
+        
+        Rate limiting paces OpenAI audio delivery to real-time speed, preventing
+        Discord from speeding up playback when it detects pre-buffered audio.
+        
+        Parameters:
+        - enabled: True to enable rate limiting, False to disable
+        - buffer_ms: Target buffer size in milliseconds (default: 200)
+        
+        Examples:
+        - `[p]realtalk ratelimit true` - Enable rate limiting with default settings
+        - `[p]realtalk ratelimit false` - Disable rate limiting (use original behavior)
+        - `[p]realtalk ratelimit true 150` - Enable with 150ms target buffer
+        """
+        if enabled is None and buffer_ms is None:
+            # Show current settings
+            current_enabled = await self.config.audio_rate_limiting()
+            current_buffer = await self.config.audio_buffer_target_ms()
+            status = "enabled" if current_enabled else "disabled"
+            await ctx.send(f"Audio rate limiting is currently **{status}** with {current_buffer}ms target buffer.\n"
+                          f"Use `{ctx.prefix}realtalk ratelimit <true/false> [buffer_ms]` to change settings.")
+            return
+        
+        if enabled is not None:
+            await self.config.audio_rate_limiting.set(enabled)
+            status = "enabled" if enabled else "disabled"
+            await ctx.send(f"Audio rate limiting {status}.")
+        
+        if buffer_ms is not None:
+            if buffer_ms < 50 or buffer_ms > 1000:
+                await ctx.send("Buffer size must be between 50ms and 1000ms.")
+                return
+            await self.config.audio_buffer_target_ms.set(buffer_ms)
+            await ctx.send(f"Audio buffer target set to {buffer_ms}ms.")
+        
+        await ctx.send("Rejoin voice channel to apply audio settings.")
+
     @realtalk.group(name="show")
     async def show_group(self, ctx: red_commands.Context):
         """Show current RealTalk configuration values."""
@@ -525,6 +568,8 @@ class RealTalk(red_commands.Cog):
         local_threshold = await self.config.audio_threshold()
         idle = await self.config.idle_timeout()
         local_silence = await self.config.silence_threshold()
+        rate_limiting = await self.config.audio_rate_limiting()
+        buffer_target = await self.config.audio_buffer_target_ms()
 
         lines = [
             "**RealTalk Settings**",
@@ -537,6 +582,7 @@ class RealTalk(red_commands.Cog):
             f"Local audio threshold: `{local_threshold}`",
             f"Local silence hangover: `{local_silence}` ms",
             f"Idle timeout: `{idle}` seconds",
+            f"Audio rate limiting: `{rate_limiting}` (buffer: {buffer_target}ms)",
             "",
             "System prompt:",
             box(prompt or "(empty)")
@@ -758,6 +804,10 @@ class RealTalk(red_commands.Cog):
                 "threshold": await self.config.server_vad_threshold(),
                 "silence_ms": await self.config.server_vad_silence_ms(),
             }
+            
+            # Audio rate control configuration
+            audio_rate_limiting = await self.config.audio_rate_limiting()
+            audio_buffer_target_ms = await self.config.audio_buffer_target_ms()
 
             realtime_client = RealtimeClient(
                 api_key,
@@ -826,21 +876,36 @@ class RealTalk(red_commands.Cog):
                 try:
                     nonlocal current_audio_source
                     
-                    # Create fresh audio source if needed (new response)
+                    # Create fresh rate-limited audio source if needed (new response)
                     if current_audio_source is None:
-                        current_audio_source = PCMQueueAudioSource()
+                        # Use rate-limited audio source to prevent Discord timing compensation
+                        
+                        current_audio_source = RateLimitedAudioSource(
+                            rate_limit_enabled=audio_rate_limiting,
+                            target_buffer_ms=audio_buffer_target_ms
+                        )
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
-                        log.debug("Created fresh audio source for new response")
+                        log.debug(f"Created fresh rate-limited audio source (rate_limit={audio_rate_limiting}, "
+                                f"buffer_target={audio_buffer_target_ms}ms)")
                     
-                    # Always queue audio data first
+                    # Queue audio data (will be paced if rate limiting enabled)
                     current_audio_source.put_audio(audio_data)
                     
                     # Start playback only when we have adequate buffer to prevent timing compensation
-                    # Use the AudioSource's ready_for_playback property (5+ frames = 100ms minimum)
+                    # Use the AudioSource's ready_for_playback property which considers both pacing and PCM buffers
                     if (voice_client and not voice_client.is_playing() and 
                         current_audio_source.ready_for_playback):
+                        
+                        # Start Discord playback
                         voice_client.play(current_audio_source, after=_audio_finished)
-                        log.debug(f"Started Discord audio playback with {current_audio_source.queue_size} frames buffered")
+                        
+                        # Start rate control pacing if enabled
+                        if hasattr(current_audio_source, 'start_pacing'):
+                            current_audio_source.start_pacing()
+                        
+                        total_buffer = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
+                        log.debug(f"Started Discord audio playback with {total_buffer} frames buffered "
+                                f"(rate_limiting={current_audio_source.rate_limit_enabled})")
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
@@ -882,11 +947,12 @@ class RealTalk(red_commands.Cog):
                     if current_audio_source:
                         # Don't immediately finish stream - let it play out naturally
                         # Only finish if queue is very low to prevent premature ending
-                        if current_audio_source.queue_size <= 2:  # Less than 40ms remaining
+                        total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
+                        if total_queue <= 2:  # Less than 40ms remaining
                             current_audio_source.finish_stream()
                             log.debug("Response completed with low queue - marked stream for completion")
                         else:
-                            log.debug(f"Response completed but {current_audio_source.queue_size} frames remain - letting play out")
+                            log.debug(f"Response completed but {total_queue} frames remain - letting play out")
                 except Exception:
                     pass
             

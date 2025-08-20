@@ -427,6 +427,350 @@ class PCMQueueAudioSource(discord.AudioSource):
                     f"Queue: {stats['queue_size']} frames ({stats['queue_duration_ms']:.0f}ms)")
 
 
+class RateLimitedAudioSource(discord.AudioSource):
+    """
+    Rate-limited audio source that paces OpenAI audio delivery to real-time playback speed.
+    
+    This class solves the Discord timing compensation issue by converting OpenAI's "burst"
+    audio delivery into a consistent real-time stream that mimics live microphone input.
+    
+    Features:
+    - Clock-based pacing to maintain 20ms frame intervals
+    - Prevents Discord's timing compensation from triggering
+    - Wraps existing PCMQueueAudioSource for compatibility
+    - Handles network delays and audio gaps gracefully
+    - Memory-efficient with bounded buffers
+    """
+    
+    def __init__(self, 
+                 target_sample_rate: int = 48000, 
+                 channels: int = 2, 
+                 frame_size: int = 960,
+                 rate_limit_enabled: bool = True,
+                 target_buffer_ms: int = 200):
+        super().__init__()
+        
+        # Wrap existing PCMQueueAudioSource
+        self.pcm_source = PCMQueueAudioSource(target_sample_rate, channels, frame_size)
+        
+        # Rate control configuration
+        self.rate_limit_enabled = rate_limit_enabled
+        self.target_frame_interval = 0.02  # 20ms per frame (50 FPS)
+        self.target_buffer_ms = target_buffer_ms
+        
+        # Clock-based timing state
+        self.playback_start_time: Optional[float] = None
+        self.frames_delivered = 0
+        self.last_frame_time = 0.0
+        
+        # Pacing buffer for smooth delivery (bounded to prevent memory issues)
+        max_buffer_frames = int((target_buffer_ms * 2) / 20)  # 2x target buffer as max
+        self.pacing_queue = asyncio.Queue(maxsize=max_buffer_frames)
+        self.pacing_task: Optional[asyncio.Task] = None
+        self._stop_pacing = False
+        
+        # Audio duration tracking for rate calculation
+        self.accumulated_audio_time = 0.0
+        
+        # Performance monitoring
+        self.rate_control_stats = {
+            'frames_paced': 0,
+            'frames_skipped': 0,
+            'timing_errors': 0,
+            'buffer_overruns': 0
+        }
+        
+        log.info(f"RateLimitedAudioSource initialized: rate_limit={rate_limit_enabled}, "
+                f"target_buffer={target_buffer_ms}ms")
+    
+    async def _audio_pacing_loop(self):
+        """
+        Clock-based audio pacing loop that delivers audio chunks at real-time speed.
+        
+        This prevents Discord timing compensation by maintaining consistent 20ms delivery cadence,
+        making the audio source behave like a live microphone feed rather than a pre-buffered file.
+        """
+        log.debug("Starting audio pacing loop")
+        
+        while self.rate_limit_enabled and not self._stop_pacing:
+            try:
+                loop_start_time = time.time()
+                
+                # Calculate expected frame time based on playback position
+                if self.playback_start_time is None:
+                    self.playback_start_time = loop_start_time
+                    
+                expected_frame_time = (self.playback_start_time + 
+                                     self.frames_delivered * self.target_frame_interval)
+                
+                # Wait until it's time for the next frame
+                current_time = time.time()
+                sleep_duration = expected_frame_time - current_time
+                
+                # Only sleep if we're ahead of schedule
+                if sleep_duration > 0:
+                    # Cap sleep duration to prevent issues with clock drift
+                    sleep_duration = min(sleep_duration, self.target_frame_interval)
+                    await asyncio.sleep(sleep_duration)
+                elif sleep_duration < -0.1:  # More than 100ms behind
+                    # We're falling behind - log and reset timing to prevent drift
+                    log.debug(f"Audio pacing falling behind by {-sleep_duration:.3f}s - resetting timing")
+                    self.playback_start_time = current_time
+                    self.frames_delivered = 0
+                    self.rate_control_stats['timing_errors'] += 1
+                
+                # Deliver queued audio to PCM source if available
+                try:
+                    # Use get_nowait() to avoid blocking the pacing loop
+                    audio_chunk = self.pacing_queue.get_nowait()
+                    self.pcm_source.put_audio(audio_chunk)
+                    self.frames_delivered += 1
+                    self.rate_control_stats['frames_paced'] += 1
+                    
+                    # Log progress occasionally
+                    if self.frames_delivered % 250 == 0:  # Every 5 seconds
+                        queue_size = self.pacing_queue.qsize()
+                        log.debug(f"Rate control: {self.frames_delivered} frames paced, "
+                                f"{queue_size} frames queued ({queue_size * 20}ms)")
+                    
+                except asyncio.QueueEmpty:
+                    # No audio available - this is normal during gaps
+                    # The underlying PCM source will handle silence frames
+                    pass
+                
+                # Track actual loop timing for debugging
+                self.last_frame_time = time.time()
+                
+            except asyncio.CancelledError:
+                log.debug("Audio pacing loop cancelled")
+                break
+            except Exception as e:
+                log.error(f"Error in audio pacing loop: {e}")
+                self.rate_control_stats['timing_errors'] += 1
+                # Brief sleep to prevent tight error loops
+                await asyncio.sleep(0.001)
+        
+        log.debug("Audio pacing loop stopped")
+    
+    def queue_audio_for_pacing(self, audio_data: bytes, duration_ms: float = None):
+        """
+        Queue audio data for rate-controlled delivery.
+        
+        Args:
+            audio_data: Raw 24kHz mono PCM from OpenAI
+            duration_ms: Expected playback duration of this chunk (calculated if None)
+        """
+        try:
+            if not audio_data:
+                return
+            
+            # Calculate duration if not provided (assuming 24kHz mono 16-bit)
+            if duration_ms is None:
+                samples = len(audio_data) // 2  # 16-bit = 2 bytes per sample
+                duration_ms = (samples / 24000) * 1000  # OpenAI sends 24kHz
+            
+            # Track accumulated audio time for monitoring
+            self.accumulated_audio_time += duration_ms
+            
+            # Queue for paced delivery with overflow protection
+            try:
+                self.pacing_queue.put_nowait(audio_data)
+            except asyncio.QueueFull:
+                # Buffer is full - drop oldest audio to prevent memory buildup
+                try:
+                    discarded = self.pacing_queue.get_nowait()
+                    self.pacing_queue.put_nowait(audio_data)
+                    self.rate_control_stats['buffer_overruns'] += 1
+                    log.debug("Dropped oldest audio chunk to prevent buffer overflow")
+                except asyncio.QueueEmpty:
+                    # Race condition - queue became empty, just add new audio
+                    try:
+                        self.pacing_queue.put_nowait(audio_data)
+                    except asyncio.QueueFull:
+                        # Still full - skip this chunk
+                        self.rate_control_stats['frames_skipped'] += 1
+                        log.warning("Skipped audio chunk - pacing buffer full")
+            
+        except Exception as e:
+            log.error(f"Error queuing audio for pacing: {e}")
+    
+    def start_pacing(self):
+        """Start rate-limited audio delivery."""
+        if self.rate_limit_enabled and (self.pacing_task is None or self.pacing_task.done()):
+            self._stop_pacing = False
+            self.playback_start_time = time.time()
+            self.frames_delivered = 0
+            self.pacing_task = asyncio.create_task(self._audio_pacing_loop())
+            log.debug("Started clock-based audio pacing")
+    
+    def stop_pacing(self):
+        """Stop rate-limited audio delivery."""
+        self._stop_pacing = True
+        if self.pacing_task and not self.pacing_task.done():
+            self.pacing_task.cancel()
+        log.debug("Stopped audio pacing")
+    
+    def enable_rate_limiting(self, enabled: bool):
+        """Enable or disable rate limiting."""
+        if enabled and not self.rate_limit_enabled:
+            self.rate_limit_enabled = True
+            self.start_pacing()
+            log.debug("Rate limiting enabled")
+        elif not enabled and self.rate_limit_enabled:
+            self.rate_limit_enabled = False
+            self.stop_pacing()
+            log.debug("Rate limiting disabled")
+    
+    # AudioSource interface methods - delegate to wrapped PCM source
+    
+    def read(self) -> bytes:
+        """Read next audio frame for Discord playback."""
+        return self.pcm_source.read()
+    
+    def is_opus(self) -> bool:
+        """Return False as we provide PCM data."""
+        return self.pcm_source.is_opus()
+    
+    def cleanup(self):
+        """Clean up resources."""
+        self.stop_pacing()
+        if hasattr(self.pcm_source, 'cleanup'):
+            self.pcm_source.cleanup()
+    
+    # Delegate all other methods to the wrapped PCM source
+    
+    def put_audio(self, audio_data: bytes):
+        """Add audio data - routes through rate limiting if enabled."""
+        if self.rate_limit_enabled:
+            self.queue_audio_for_pacing(audio_data)
+        else:
+            self.pcm_source.put_audio(audio_data)
+    
+    def reset_state(self):
+        """Reset internal streaming state."""
+        self.stop_pacing()
+        self.pcm_source.reset_state()
+        
+        # Clear pacing buffers
+        try:
+            while True:
+                self.pacing_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        
+        # Reset timing state
+        self.playback_start_time = None
+        self.frames_delivered = 0
+        self.accumulated_audio_time = 0.0
+    
+    def finish_stream(self):
+        """Signal that the audio stream is complete."""
+        self.pcm_source.finish_stream()
+        # Don't stop pacing immediately - let remaining audio play out
+    
+    def interrupt_playback(self):
+        """Immediately interrupt playback for user interruptions."""
+        self.stop_pacing()
+        self.pcm_source.interrupt_playback()
+        self.reset_state()
+    
+    def start(self):
+        """Start audio playback."""
+        self.pcm_source.start()
+        if self.rate_limit_enabled:
+            self.start_pacing()
+    
+    def stop(self):
+        """Stop audio playback."""
+        self.stop_pacing()
+        self.pcm_source.stop()
+    
+    def clear_queue(self):
+        """Clear audio queues."""
+        self.pcm_source.clear_queue()
+        try:
+            while True:
+                self.pacing_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    
+    def set_volume(self, volume: float):
+        """Set playback volume."""
+        self.pcm_source.set_volume(volume)
+    
+    # Properties - delegate to wrapped source
+    
+    @property
+    def queue_size(self) -> int:
+        """Get current PCM queue size."""
+        return self.pcm_source.queue_size
+    
+    @property
+    def pacing_queue_size(self) -> int:
+        """Get current pacing queue size."""
+        return self.pacing_queue.qsize()
+    
+    @property
+    def total_queue_size(self) -> int:
+        """Get total queued audio (pacing + PCM)."""
+        return self.pacing_queue_size + self.queue_size
+    
+    @property
+    def queue_duration_ms(self) -> float:
+        """Get current total queue duration in milliseconds."""
+        return (self.total_queue_size * 20)  # 20ms per frame
+    
+    @property
+    def is_empty(self) -> bool:
+        """Check if all audio queues are empty."""
+        return self.pcm_source.is_empty and self.pacing_queue_size == 0
+    
+    @property
+    def ready_for_playback(self) -> bool:
+        """Check if we have enough buffered audio to start playback safely."""
+        if self.rate_limit_enabled:
+            # For rate-limited mode, check both pacing and PCM buffers
+            pacing_buffer_ms = self.pacing_queue_size * 20
+            return (pacing_buffer_ms >= self.target_buffer_ms // 2 and  # Half target buffer in pacing
+                   self.pcm_source.ready_for_playback)  # Plus PCM buffer ready
+        else:
+            return self.pcm_source.ready_for_playback
+    
+    def get_stats(self) -> dict:
+        """Get comprehensive audio source statistics."""
+        pcm_stats = self.pcm_source.get_stats()
+        
+        rate_stats = {
+            "rate_limiting_enabled": self.rate_limit_enabled,
+            "pacing_queue_size": self.pacing_queue_size,
+            "total_queue_size": self.total_queue_size,
+            "total_queue_duration_ms": self.queue_duration_ms,
+            "frames_paced": self.rate_control_stats['frames_paced'],
+            "frames_skipped": self.rate_control_stats['frames_skipped'],
+            "timing_errors": self.rate_control_stats['timing_errors'],
+            "buffer_overruns": self.rate_control_stats['buffer_overruns'],
+            "accumulated_audio_time_ms": self.accumulated_audio_time,
+        }
+        
+        # Merge stats
+        return {**pcm_stats, **rate_stats}
+    
+    def log_stats(self):
+        """Log comprehensive performance statistics."""
+        stats = self.get_stats()
+        
+        if stats["frames_played"] > 0:
+            pacing_efficiency = (stats["frames_paced"] / max(1, stats["frames_paced"] + stats["frames_skipped"])) * 100
+            
+            log.info(f"RateLimited Audio Stats - "
+                    f"PCM: {stats['queue_size']} frames, "
+                    f"Pacing: {stats['pacing_queue_size']} frames, "
+                    f"Total: {stats['total_queue_duration_ms']:.0f}ms, "
+                    f"Efficiency: {pacing_efficiency:.1f}%, "
+                    f"Errors: {stats['timing_errors']}, "
+                    f"Overruns: {stats['buffer_overruns']}")
+
+
 class AudioConverter:
     """
     Audio conversion utilities for RealTalk.
