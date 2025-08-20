@@ -818,12 +818,20 @@ class RealTalk(red_commands.Cog):
                     if current_audio_source is None:
                         current_audio_source = PCMQueueAudioSource()
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
+                        log.debug("Created fresh audio source for new response")
                     
-                    current_audio_source.put_audio(audio_data)
-                    if voice_client and not voice_client.is_playing():
-                        voice_client.play(current_audio_source)
-                except Exception:
-                    pass
+                    # Only add audio if queue isn't overflowing (prevent rapid buildup)
+                    if current_audio_source.queue_size < 50:  # ~1 second max buffer
+                        current_audio_source.put_audio(audio_data)
+                        
+                        # Always ensure playback is active when audio is present
+                        if voice_client and not voice_client.is_playing() and not current_audio_source.is_empty:
+                            voice_client.play(current_audio_source)
+                            log.debug("Started Discord audio playback")
+                    else:
+                        log.warning(f"Audio queue overflow: {current_audio_source.queue_size} frames, dropping audio")
+                except Exception as e:
+                    log.error(f"Error in audio output handler: {e}")
 
             realtime_client.on_audio_output = _handle_audio_output
             

@@ -138,6 +138,10 @@ class PCMQueueAudioSource(discord.AudioSource):
                     audio_data = self.audio_queue.popleft()
                     self.frames_played += 1
                     
+                    # Log playback progress for debugging
+                    if self.frames_played % 50 == 0:  # Every 1 second
+                        log.debug(f"Discord reading audio: {self.frames_played} frames played, {len(self.audio_queue)} in queue")
+                    
                     # Apply volume control if needed
                     if self.volume != 1.0:
                         audio_data = self._apply_volume(audio_data)
@@ -146,6 +150,8 @@ class PCMQueueAudioSource(discord.AudioSource):
                 else:
                     # No audio available - signal stream end so Discord stops "speaking"
                     self.underrun_count += 1
+                    if self.underrun_count % 10 == 1:  # Log underruns occasionally
+                        log.debug(f"Audio underrun #{self.underrun_count} - queue empty")
                     return b''
                     
         except Exception as e:
@@ -197,11 +203,16 @@ class PCMQueueAudioSource(discord.AudioSource):
 
                     if len(self.audio_queue) >= self.max_queue_size:
                         # Drop oldest to avoid latency buildup
-                        self.audio_queue.popleft()
+                        dropped_frame = self.audio_queue.popleft()
                         self.frames_dropped += 1
+                        log.warning(f"Dropped audio frame, queue at max capacity: {self.max_queue_size}")
 
                     self.audio_queue.append(frame)
                     self.frames_queued += 1
+                    
+                    # Log when queue gets large
+                    if len(self.audio_queue) > 25:  # Half capacity warning
+                        log.warning(f"Audio queue building up: {len(self.audio_queue)} frames ({len(self.audio_queue) * 20}ms)")
 
                 # Keep leftover for next call
                 self._leftover = buffer[idx:]
