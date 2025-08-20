@@ -170,6 +170,10 @@ class VoiceCapture:
         self.frames_dropped = 0
         self.last_stats_time = time.time()
 
+        # Fallback VAD/commit state
+        self._sent_since_commit = False
+        self._last_sent_ts: float = 0.0
+
     async def start(self):
         """Start voice capture with enhanced error handling."""
         try:
@@ -262,6 +266,23 @@ class VoiceCapture:
 
                 # Send mixed audio to OpenAI
                 await self._send_mixed_audio()
+
+                # CLIENT-SIDE FALLBACK: if server VAD doesn't emit, commit and request response
+                try:
+                    last_any = 0.0
+                    if self.last_audio_time:
+                        try:
+                            last_any = max(self.last_audio_time.values())
+                        except Exception:
+                            last_any = 0.0
+
+                    # If we sent audio recently but now silent beyond threshold, commit + create response
+                    if self._sent_since_commit and last_any and (current_time - last_any) >= (self.silence_threshold / 1000.0):
+                        await self.realtime_client.commit_audio_buffer()
+                        await self.realtime_client.create_response()
+                        self._sent_since_commit = False
+                except Exception:
+                    pass
 
                 # Performance monitoring
                 self._update_performance_stats(current_time)
@@ -434,6 +455,9 @@ class VoiceCapture:
                     mixed_24k = self._downsample_48k_to_24k_mono(mixed_audio)
                     if mixed_24k:
                         await self.realtime_client.send_audio(mixed_24k)
+                        # Track that we've sent audio since the last commit
+                        self._sent_since_commit = True
+                        self._last_sent_ts = time.time()
                         log.debug(f"Sent audio to OpenAI: {len(mixed_24k)} bytes (24kHz mono)")
 
         except Exception as e:

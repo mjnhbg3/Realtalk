@@ -893,14 +893,25 @@ class RealTalk(red_commands.Cog):
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug(f"Created fresh rate-limited audio source (rate_limit={audio_rate_limiting}, "
                                 f"buffer_target={audio_buffer_target_ms}ms)")
+
+                        # PRIME: start pacing immediately so PCM buffer fills before playback
+                        try:
+                            if hasattr(current_audio_source, 'start_pacing'):
+                                current_audio_source.start_pacing()
+                        except Exception:
+                            pass
                     
                     # Queue audio data (will be paced if rate limiting enabled)
                     current_audio_source.put_audio(audio_data)
                     
                     # Start playback only when we have adequate buffer to prevent timing compensation
                     # Use the AudioSource's ready_for_playback property which considers both pacing and PCM buffers
-                    if (voice_client and not voice_client.is_playing() and 
-                        current_audio_source.ready_for_playback):
+                    # Also allow start when pacing buffer has reached the full target buffer
+                    pacing_frames = getattr(current_audio_source, 'pacing_queue_size', 0)
+                    pacing_ms = pacing_frames * 20
+                    if (voice_client and not voice_client.is_playing() and (
+                        current_audio_source.ready_for_playback or pacing_ms >= audio_buffer_target_ms
+                    )):
                         
                         # Start Discord playback
                         voice_client.play(current_audio_source, after=_audio_finished)
