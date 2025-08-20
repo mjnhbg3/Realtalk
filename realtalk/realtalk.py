@@ -820,8 +820,8 @@ class RealTalk(red_commands.Cog):
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
                         
-                        # Start playback immediately with the new source
-                        if voice_client:
+                        # Start playback only if not already playing
+                        if voice_client and not voice_client.is_playing():
                             voice_client.play(current_audio_source)
                             log.debug("Started Discord audio playback with fresh source")
                     
@@ -859,12 +859,11 @@ class RealTalk(red_commands.Cog):
             def _on_resp_start():
                 try:
                     nonlocal current_audio_source
-                    # Prepare for fresh audio source (will be created on first audio data)
+                    # Clear audio queue but keep playback running for continuous stream
                     if current_audio_source:
-                        current_audio_source.stop()
-                    current_audio_source = None
-                    self.sessions[guild_id]["current_audio_source"] = None
-                    log.debug("Reset audio source for new response")
+                        current_audio_source.clear_queue()
+                        log.debug("Cleared audio queue for new response")
+                    # Don't set to None - reuse the same AudioSource to avoid "Already playing" error
                 except Exception:
                     pass
             
