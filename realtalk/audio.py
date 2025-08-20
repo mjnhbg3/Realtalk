@@ -87,7 +87,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         sample_rate: int = 48000, 
         channels: int = 2, 
         frame_size: int = 960,  # 20ms at 48kHz
-        max_queue_size: int = 20,  # ~400ms of audio - increased for stability against timing compensation
+        max_queue_size: int = 10,  # ~200ms of audio - reduced to prevent timing compensation
         volume: float = 1.0
     ):
         super().__init__()
@@ -111,7 +111,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         # Audio stream state tracking
         self.has_real_audio = False  # Track if we've received actual audio data
         self.stream_finished = False  # Track if stream is truly done
-        self.min_buffer_size = 8  # Minimum frames before allowing playback start
+        self.min_buffer_size = 3  # Minimum frames before allowing playback start (60ms)
         self.timing_stable = False  # Track if timing has stabilized
         
         # Silence frame for padding
@@ -232,11 +232,12 @@ class PCMQueueAudioSource(discord.AudioSource):
                     idx += frame_bytes
 
                     if len(self.audio_queue) >= self.max_queue_size:
-                        # Drop oldest to avoid latency buildup but keep timing smooth
-                        dropped_frame = self.audio_queue.popleft()
+                        # Instead of dropping, skip adding this frame to prevent timing issues
+                        # This maintains consistent timing without creating gaps
                         self.frames_dropped += 1
                         if self.frames_dropped % 10 == 1:  # Log less frequently to reduce spam
-                            log.debug(f"Dropped audio frame, queue at max capacity: {self.max_queue_size}")
+                            log.debug(f"Skipped audio frame due to full queue: {self.max_queue_size}")
+                        continue  # Skip adding this frame
 
                     self.audio_queue.append(frame)
                     self.frames_queued += 1
