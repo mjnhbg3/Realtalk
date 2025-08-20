@@ -876,13 +876,17 @@ class RealTalk(red_commands.Cog):
                     pass
             
             def _on_resp_done():
-                # Response completed - signal that the stream should end when queue empties
+                # Response completed - but don't immediately finish stream to prevent timing compensation
                 try:
                     nonlocal current_audio_source
                     if current_audio_source:
-                        # Signal that we're done sending audio - stream can end when queue empties
-                        current_audio_source.finish_stream()
-                        log.debug("Response completed - marked stream for completion")
+                        # Don't immediately finish stream - let it play out naturally
+                        # Only finish if queue is very low to prevent premature ending
+                        if current_audio_source.queue_size <= 2:  # Less than 40ms remaining
+                            current_audio_source.finish_stream()
+                            log.debug("Response completed with low queue - marked stream for completion")
+                        else:
+                            log.debug(f"Response completed but {current_audio_source.queue_size} frames remain - letting play out")
                 except Exception:
                     pass
             
