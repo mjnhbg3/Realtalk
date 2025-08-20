@@ -836,13 +836,9 @@ class RealTalk(red_commands.Cog):
                             voice_client.play(current_audio_source, after=_audio_finished)
                             log.debug("Started Discord audio playback with fresh source and callback")
                     
-                    # Use smaller buffer to reduce latency and prevent skipping
-                    if current_audio_source.queue_size < 10:  # ~200ms max buffer
-                        current_audio_source.put_audio(audio_data)
-                    else:
-                        # Drop audio but log less frequently to reduce spam
-                        if current_audio_source.queue_size % 10 == 0:
-                            log.warning(f"Audio queue at {current_audio_source.queue_size} frames, dropping audio to prevent buildup")
+                    # Always queue audio - let PCMQueueAudioSource handle overflow internally
+                    # Don't drop audio here as it causes Discord timing desync and fast-forward
+                    current_audio_source.put_audio(audio_data)
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
