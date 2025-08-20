@@ -819,17 +819,20 @@ class RealTalk(red_commands.Cog):
                         current_audio_source = PCMQueueAudioSource()
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
-                    
-                    # Only add audio if queue isn't overflowing (prevent rapid buildup)
-                    if current_audio_source.queue_size < 50:  # ~1 second max buffer
-                        current_audio_source.put_audio(audio_data)
                         
-                        # Always ensure playback is active when audio is present
-                        if voice_client and not voice_client.is_playing() and not current_audio_source.is_empty:
+                        # Start playback immediately with the new source
+                        if voice_client:
                             voice_client.play(current_audio_source)
-                            log.debug("Started Discord audio playback")
+                            log.debug("Started Discord audio playback with fresh source")
+                    
+                    # Use smaller buffer to reduce latency and prevent skipping
+                    if current_audio_source.queue_size < 10:  # ~200ms max buffer
+                        current_audio_source.put_audio(audio_data)
                     else:
-                        log.warning(f"Audio queue overflow: {current_audio_source.queue_size} frames, dropping audio")
+                        # Drop audio but log less frequently to reduce spam
+                        if current_audio_source.queue_size % 10 == 0:
+                            log.warning(f"Audio queue at {current_audio_source.queue_size} frames, dropping audio to prevent buildup")
+                            
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
 
@@ -856,14 +859,18 @@ class RealTalk(red_commands.Cog):
             def _on_resp_start():
                 try:
                     nonlocal current_audio_source
-                    # Create fresh audio source for new response (fixes garbled audio)
+                    # Prepare for fresh audio source (will be created on first audio data)
+                    if current_audio_source:
+                        current_audio_source.stop()
                     current_audio_source = None
                     self.sessions[guild_id]["current_audio_source"] = None
+                    log.debug("Reset audio source for new response")
                 except Exception:
                     pass
             
             def _on_resp_done():
-                # Response completed - keep audio source until next response starts
+                # Response completed - audio source will continue until next response
+                log.debug("Response completed")
                 pass
             
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started

@@ -148,11 +148,12 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # No audio available - signal stream end so Discord stops "speaking"
+                    # Return silence instead of ending stream to keep Discord reading
+                    # This prevents the need to restart playback constantly
                     self.underrun_count += 1
-                    if self.underrun_count % 10 == 1:  # Log underruns occasionally
-                        log.debug(f"Audio underrun #{self.underrun_count} - queue empty")
-                    return b''
+                    if self.underrun_count % 50 == 1:  # Log underruns occasionally
+                        log.debug(f"Audio underrun #{self.underrun_count} - returning silence to keep stream alive")
+                    return self.silence_frame
                     
         except Exception as e:
             log.error(f"Error reading audio frame: {e}")
@@ -210,9 +211,9 @@ class PCMQueueAudioSource(discord.AudioSource):
                     self.audio_queue.append(frame)
                     self.frames_queued += 1
                     
-                    # Log when queue gets large
-                    if len(self.audio_queue) > 25:  # Half capacity warning
-                        log.warning(f"Audio queue building up: {len(self.audio_queue)} frames ({len(self.audio_queue) * 20}ms)")
+                    # Log when queue gets large (but less frequently)
+                    if len(self.audio_queue) > 5 and len(self.audio_queue) % 5 == 0:  # Every 5 frames when over 5
+                        log.debug(f"Audio queue size: {len(self.audio_queue)} frames ({len(self.audio_queue) * 20}ms)")
 
                 # Keep leftover for next call
                 self._leftover = buffer[idx:]
