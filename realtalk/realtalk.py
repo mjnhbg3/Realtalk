@@ -794,15 +794,15 @@ class RealTalk(red_commands.Cog):
             except Exception:
                 pass
             
-            # Initialize audio source for bot speech
-            audio_source = PCMQueueAudioSource()
+            # Initialize current audio source reference (will be created fresh per response)
+            current_audio_source = None
             
             # Store session
             self.sessions[guild_id] = {
                 "voice_client": voice_client,
                 "realtime_client": realtime_client,
                 "voice_capture": voice_capture,
-                "audio_source": audio_source,
+                "current_audio_source": current_audio_source,
                 "context": ctx,
                 "start_time": time.time()
             }
@@ -813,9 +813,15 @@ class RealTalk(red_commands.Cog):
             # Set up audio output callback: enqueue and start playback on demand
             def _handle_audio_output(audio_data: bytes):
                 try:
-                    audio_source.put_audio(audio_data)
+                    nonlocal current_audio_source
+                    # Create fresh audio source if needed (new response)
+                    if current_audio_source is None:
+                        current_audio_source = PCMQueueAudioSource()
+                        self.sessions[guild_id]["current_audio_source"] = current_audio_source
+                    
+                    current_audio_source.put_audio(audio_data)
                     if voice_client and not voice_client.is_playing():
-                        voice_client.play(audio_source)
+                        voice_client.play(current_audio_source)
                 except Exception:
                     pass
 
@@ -824,11 +830,13 @@ class RealTalk(red_commands.Cog):
             # Handle user interruptions - immediate audio cutoff
             def _on_speech_started():
                 try:
+                    nonlocal current_audio_source
                     # Immediately stop Discord playback
                     if voice_client and voice_client.is_playing():
                         voice_client.stop()
                     # Clear audio buffers to prevent continuation
-                    audio_source.interrupt_playback()
+                    if current_audio_source:
+                        current_audio_source.interrupt_playback()
                 except Exception as e:
                     log.error(f"Error handling speech interruption: {e}")
             
@@ -839,14 +847,15 @@ class RealTalk(red_commands.Cog):
             # Reset playback state on response boundaries
             def _on_resp_start():
                 try:
-                    # Only reset if not already interrupted
-                    if not voice_client or not voice_client.is_playing():
-                        audio_source.reset_state()
+                    nonlocal current_audio_source
+                    # Create fresh audio source for new response (fixes garbled audio)
+                    current_audio_source = None
+                    self.sessions[guild_id]["current_audio_source"] = None
                 except Exception:
                     pass
             
             def _on_resp_done():
-                # Response completed
+                # Response completed - keep audio source until next response starts
                 pass
             
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
@@ -896,10 +905,10 @@ class RealTalk(red_commands.Cog):
             if realtime_client:
                 await realtime_client.disconnect()
                 
-            # Stop audio source
-            audio_source = session.get("audio_source")
-            if audio_source:
-                audio_source.stop()
+            # Stop current audio source
+            current_audio_source = session.get("current_audio_source")
+            if current_audio_source:
+                current_audio_source.stop()
                 
             # Disconnect voice client
             voice_client = session.get("voice_client")
