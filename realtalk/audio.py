@@ -148,12 +148,12 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # Return silence instead of ending stream to keep Discord reading
-                    # This prevents the need to restart playback constantly
+                    # Return empty bytes to properly end the stream when no audio available
+                    # This stops Discord from thinking we're still talking
                     self.underrun_count += 1
                     if self.underrun_count % 50 == 1:  # Log underruns occasionally
-                        log.debug(f"Audio underrun #{self.underrun_count} - returning silence to keep stream alive")
-                    return self.silence_frame
+                        log.debug(f"Audio underrun #{self.underrun_count} - ending stream")
+                    return b''
                     
         except Exception as e:
             log.error(f"Error reading audio frame: {e}")

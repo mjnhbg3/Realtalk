@@ -810,6 +810,17 @@ class RealTalk(red_commands.Cog):
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
             
+            # Audio playback completion callback
+            def _audio_finished(error):
+                nonlocal current_audio_source
+                if error:
+                    log.error(f"Audio playback error: {error}")
+                else:
+                    log.debug("Audio stream completed successfully")
+                # Clear the current source so new audio can start fresh playback
+                current_audio_source = None
+                self.sessions[guild_id]["current_audio_source"] = None
+            
             # Set up audio output callback: enqueue and start playback on demand
             def _handle_audio_output(audio_data: bytes):
                 try:
@@ -820,10 +831,10 @@ class RealTalk(red_commands.Cog):
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
                         
-                        # Start playback only if not already playing
-                        if voice_client and not voice_client.is_playing():
-                            voice_client.play(current_audio_source)
-                            log.debug("Started Discord audio playback with fresh source")
+                        # Start playback with after callback to handle completion
+                        if voice_client:
+                            voice_client.play(current_audio_source, after=_audio_finished)
+                            log.debug("Started Discord audio playback with fresh source and callback")
                     
                     # Use smaller buffer to reduce latency and prevent skipping
                     if current_audio_source.queue_size < 10:  # ~200ms max buffer
@@ -859,11 +870,11 @@ class RealTalk(red_commands.Cog):
             def _on_resp_start():
                 try:
                     nonlocal current_audio_source
-                    # Clear audio queue but keep playback running for continuous stream
-                    if current_audio_source:
-                        current_audio_source.clear_queue()
-                        log.debug("Cleared audio queue for new response")
-                    # Don't set to None - reuse the same AudioSource to avoid "Already playing" error
+                    # Stop current playback to prepare for new response
+                    if current_audio_source and voice_client and voice_client.is_playing():
+                        voice_client.stop()
+                        log.debug("Stopped current audio for new response")
+                    # Audio source will be created fresh when new audio data arrives
                 except Exception:
                     pass
             
