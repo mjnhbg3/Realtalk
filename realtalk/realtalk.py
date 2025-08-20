@@ -728,11 +728,23 @@ class RealTalk(red_commands.Cog):
                         log.debug(f"Error cleaning up existing voice client: {cleanup_error}")
                 
                 # Import voice receive extension and use its client to enable capture
+                # Try multiple import patterns to improve reliability across installs
+                recv_cls = None
                 try:
-                    voice_recv_module = __import__('voice_recv')
-                    recv_cls = getattr(voice_recv_module, 'VoiceRecvClient', None)
+                    import importlib
+                    # Try the canonical module path first
+                    m = importlib.import_module('discord.ext.voice_recv')
+                    recv_cls = getattr(m, 'VoiceRecvClient', None)
                 except Exception:
-                    recv_cls = None
+                    try:
+                        m = importlib.import_module('discord_ext_voice_recv')
+                        recv_cls = getattr(m, 'VoiceRecvClient', None)
+                    except Exception:
+                        try:
+                            m = importlib.import_module('voice_recv')
+                            recv_cls = getattr(m, 'VoiceRecvClient', None)
+                        except Exception:
+                            recv_cls = None
 
                 # Try to connect with a fresh connection, using VoiceRecvClient if available
                 connect_kwargs = {
