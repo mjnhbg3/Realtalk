@@ -87,7 +87,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         sample_rate: int = 48000, 
         channels: int = 2, 
         frame_size: int = 960,  # 20ms at 48kHz
-        max_queue_size: int = 15,  # ~300ms of audio - balance between latency and stability
+        max_queue_size: int = 20,  # ~400ms of audio - increased for stability against timing compensation
         volume: float = 1.0
     ):
         super().__init__()
@@ -111,6 +111,8 @@ class PCMQueueAudioSource(discord.AudioSource):
         # Audio stream state tracking
         self.has_real_audio = False  # Track if we've received actual audio data
         self.stream_finished = False  # Track if stream is truly done
+        self.min_buffer_size = 8  # Minimum frames before allowing playback start
+        self.timing_stable = False  # Track if timing has stabilized
         
         # Silence frame for padding
         self.silence_frame = self._create_silence_frame()
@@ -133,7 +135,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         Read next audio frame for Discord playback.
         
         Returns:
-            bytes: PCM audio data for one frame (20ms) or silence to maintain timing
+            bytes: PCM audio data for one frame (20ms) or silence to maintain continuous stream
         """
         try:
             with self.queue_lock:
@@ -142,9 +144,15 @@ class PCMQueueAudioSource(discord.AudioSource):
                     audio_data = self.audio_queue.popleft()
                     self.frames_played += 1
                     
+                    # Mark timing as stable once we start playing real audio
+                    if not self.timing_stable and self.has_real_audio:
+                        self.timing_stable = True
+                        log.debug("Audio timing stabilized - real audio playback started")
+                    
                     # Log playback progress for debugging
                     if self.frames_played % 50 == 0:  # Every 1 second
-                        log.debug(f"Discord reading audio: {self.frames_played} frames played, {len(self.audio_queue)} in queue")
+                        queue_len = len(self.audio_queue)
+                        log.debug(f"Discord reading audio: {self.frames_played} frames played, {queue_len} in queue")
                     
                     # Apply volume control if needed
                     if self.volume != 1.0:
@@ -152,19 +160,21 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # Check if we should truly end the stream or just return silence
-                    if self.stream_finished:
-                        # Return empty bytes to end stream - only when we're truly done
-                        self.underrun_count += 1
-                        if self.underrun_count % 50 == 1:  # Log underruns occasionally
-                            log.debug(f"Audio underrun #{self.underrun_count} - ending stream")
+                    # CONTINUOUS BUFFERING STRATEGY:
+                    # Always return silence to maintain Discord's 20ms timing cadence
+                    # Only end stream when explicitly finished AND no chance of more audio
+                    if self.stream_finished and not self.has_real_audio:
+                        # Truly done - never had real audio in this session
+                        return b''
+                    elif self.stream_finished and self.timing_stable:
+                        # Had real audio but stream is finished - end gracefully
+                        log.debug("Stream finished after real audio - ending playback")
                         return b''
                     else:
-                        # Return SILENCE to maintain stream timing while waiting for more audio
-                        # This prevents Discord from ending the stream and keeps timing consistent
+                        # Maintain continuous stream with silence to prevent timing compensation
                         self.underrun_count += 1
-                        if self.underrun_count % 50 == 1:  # Log underruns occasionally
-                            log.debug(f"Audio underrun #{self.underrun_count} - returning silence to maintain timing")
+                        if self.underrun_count % 100 == 1:  # Log less frequently
+                            log.debug(f"Audio gap #{self.underrun_count} - maintaining stream continuity")
                         return self.silence_frame
                     
         except Exception as e:
@@ -278,6 +288,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         self._leftover = b""
         self.has_real_audio = False
         self.stream_finished = False
+        self.timing_stable = False
         self.clear_queue()
     
     def finish_stream(self):
@@ -368,6 +379,12 @@ class PCMQueueAudioSource(discord.AudioSource):
             # Only end stream if we have no audio AND we never had real audio in this session
             # OR if we explicitly stopped the source
             return (len(self.audio_queue) == 0 and not self.has_real_audio) or not self.is_playing
+    
+    @property
+    def ready_for_playback(self) -> bool:
+        """Check if we have enough buffered audio to start playback safely."""
+        with self.queue_lock:
+            return len(self.audio_queue) >= self.min_buffer_size
 
     def get_stats(self) -> dict:
         """Get audio source statistics."""

@@ -835,10 +835,10 @@ class RealTalk(red_commands.Cog):
                     # Always queue audio data first
                     current_audio_source.put_audio(audio_data)
                     
-                    # Start playback only when we have a small buffer (3-5 frames = 60-100ms)
-                    # This prevents Discord timing compensation while maintaining low latency
+                    # Start playback only when we have adequate buffer to prevent timing compensation
+                    # Use the AudioSource's ready_for_playback property (8+ frames = 160ms minimum)
                     if (voice_client and not voice_client.is_playing() and 
-                        current_audio_source.queue_size >= 3):
+                        current_audio_source.ready_for_playback):
                         voice_client.play(current_audio_source, after=_audio_finished)
                         log.debug(f"Started Discord audio playback with {current_audio_source.queue_size} frames buffered")
                             
