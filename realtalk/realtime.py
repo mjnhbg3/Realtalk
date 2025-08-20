@@ -80,7 +80,8 @@ class RealtimeClient:
                 "type": "server_vad",
                 "threshold": (server_vad or {}).get("threshold", 0.5),
                 "prefix_padding_ms": 300,
-                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300)
+                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300),
+                "create_response": True
             },
             "tools": [],
             "tool_choice": "auto",
@@ -203,13 +204,10 @@ class RealtimeClient:
                     except Exception:
                         pass
                 else:
-                    # Auto-commit only when we have at least 120ms buffered
-                    if self._awaiting_commit and self.session_active and self._buffered_ms >= 120.0:
-                        try:
-                            await self.commit_audio_buffer()
-                            await self.create_response()
-                        finally:
-                            self._awaiting_commit = False
+                    # With server VAD and create_response: true, no manual commits needed
+                    # The server will automatically commit and create responses
+                    if self._awaiting_commit:
+                        self._awaiting_commit = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -358,13 +356,9 @@ class RealtimeClient:
                 log.debug("Speech stopped")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
-                # Commit audio buffer and trigger response
-                try:
-                    if self._buffered_ms >= 120.0:
-                        await self.commit_audio_buffer()
-                        await self.create_response()
-                except Exception as e:
-                    log.error(f"Error finalizing response after speech: {e}")
+                # With server VAD and create_response: true, the server handles this automatically
+                # Reset buffered time as the server will have committed the audio
+                self._buffered_ms = 0.0
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
@@ -387,6 +381,10 @@ class RealtimeClient:
                 if self.on_response_audio_transcript_done:
                     self.on_response_audio_transcript_done(transcript)
                     
+            elif event_type == "response.audio.done":
+                log.debug("Response audio stream completed")
+                # Audio streaming for this response is complete
+                    
             elif event_type == "response.done":
                 log.debug("Response completed")
                 self._response_active = False
@@ -395,6 +393,15 @@ class RealtimeClient:
                         self.on_response_done()
                     except Exception:
                         pass
+                
+            elif event_type == "input_audio_buffer.committed":
+                log.debug("Audio buffer committed by server")
+                # Reset buffered time as audio has been committed
+                self._buffered_ms = 0.0
+                
+            elif event_type == "input_audio_buffer.cleared":
+                log.debug("Audio buffer cleared")
+                self._buffered_ms = 0.0
                 
             elif event_type == "error":
                 error_info = event.get("error", {})
@@ -421,16 +428,16 @@ class RealtimeClient:
 
     def update_voice(self, voice: str):
         """Update the AI voice for the session."""
-        if voice in ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]:
-            self.session_config["voice"] = voice
+        if voice.lower() in ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]:
+            self.session_config["voice"] = voice.lower()
             
             if self.session_active:
                 asyncio.create_task(self._send_message({
                     "type": "session.update",
-                    "session": {"voice": voice}
+                    "session": {"voice": voice.lower()}
                 }))
         else:
-            log.warning(f"Invalid voice: {voice}")
+            log.warning(f"Invalid voice: {voice}. Valid voices: alloy, ash, ballad, coral, echo, sage, shimmer, verse")
 
     def update_vad_settings(self, threshold: float = 0.5, silence_duration_ms: int = 300):
         """Update Voice Activity Detection settings."""
@@ -438,7 +445,8 @@ class RealtimeClient:
             "type": "server_vad",
             "threshold": threshold,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": silence_duration_ms
+            "silence_duration_ms": silence_duration_ms,
+            "create_response": True
         }
         
         if self.session_active:
