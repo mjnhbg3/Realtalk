@@ -831,10 +831,13 @@ class RealTalk(red_commands.Cog):
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
                         
+                        # Prime the audio source timing by pre-calling read() - fixes Discord fast playback
+                        current_audio_source.read()  # This prevents Discord timing compensation issues
+                        
                         # Start playback with after callback to handle completion
                         if voice_client:
                             voice_client.play(current_audio_source, after=_audio_finished)
-                            log.debug("Started Discord audio playback with fresh source and callback")
+                            log.debug("Started Discord audio playback with timing fix and callback")
                     
                     # Always queue audio - let PCMQueueAudioSource handle overflow internally
                     # Don't drop audio here as it causes Discord timing desync and fast-forward
