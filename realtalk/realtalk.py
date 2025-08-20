@@ -825,23 +825,21 @@ class RealTalk(red_commands.Cog):
             def _handle_audio_output(audio_data: bytes):
                 try:
                     nonlocal current_audio_source
+                    
                     # Create fresh audio source if needed (new response)
                     if current_audio_source is None:
                         current_audio_source = PCMQueueAudioSource()
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
-                        
-                        # Prime the audio source timing by pre-calling read() - fixes Discord fast playback
-                        current_audio_source.read()  # This prevents Discord timing compensation issues
-                        
-                        # Start playback with after callback to handle completion
+                    
+                    # Always queue audio first
+                    current_audio_source.put_audio(audio_data)
+                    
+                    # Start playback only after we have some audio buffered (prevents fast playback)
+                    if not voice_client.is_playing() and current_audio_source.queue_size >= 3:
                         if voice_client:
                             voice_client.play(current_audio_source, after=_audio_finished)
-                            log.debug("Started Discord audio playback with timing fix and callback")
-                    
-                    # Always queue audio - let PCMQueueAudioSource handle overflow internally
-                    # Don't drop audio here as it causes Discord timing desync and fast-forward
-                    current_audio_source.put_audio(audio_data)
+                            log.debug("Started Discord audio playback after buffering 3 frames")
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")

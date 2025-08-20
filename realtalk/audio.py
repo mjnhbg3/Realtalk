@@ -87,7 +87,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         sample_rate: int = 48000, 
         channels: int = 2, 
         frame_size: int = 960,  # 20ms at 48kHz
-        max_queue_size: int = 5,  # ~100ms of audio - prevents Discord timing issues
+        max_queue_size: int = 15,  # ~300ms of audio - balance between latency and stability
         volume: float = 1.0
     ):
         super().__init__()
