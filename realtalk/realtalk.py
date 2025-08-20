@@ -47,7 +47,7 @@ class RealTalk(red_commands.Cog):
             "max_retry_attempts": 5,
             "retry_base_delay": 2.0,
             "voice_timeout": 30.0,
-            "audio_threshold": 0.001,
+            "audio_threshold": 0.0001,
             "silence_threshold": 300,  # local silence hangover (ms) before user stops speaking
             # New configurable options
             "voice": "Alloy",

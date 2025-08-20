@@ -383,9 +383,14 @@ class VoiceCapture:
             normalized_rms = rms / 32768.0  # Normalize to 0-1 range
 
             ok = normalized_rms > self.audio_threshold
-            if not ok and self.frames_dropped < 5:
+            if not ok:
                 try:
-                    log.info(f"Audio below threshold: rms={normalized_rms:.5f} < th={self.audio_threshold:.5f}")
+                    log.debug(f"Audio below threshold: rms={normalized_rms:.5f} < th={self.audio_threshold:.5f}")
+                except Exception:
+                    pass
+            else:
+                try:
+                    log.info(f"Audio PASSED threshold: rms={normalized_rms:.5f} > th={self.audio_threshold:.5f}")
                 except Exception:
                     pass
             return ok

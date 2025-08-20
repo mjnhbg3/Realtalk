@@ -80,8 +80,7 @@ class RealtimeClient:
                 "type": "server_vad",
                 "threshold": (server_vad or {}).get("threshold", 0.5),
                 "prefix_padding_ms": 300,
-                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300),
-                "create_response": True
+                "silence_duration_ms": (server_vad or {}).get("silence_ms", 300)
             },
             "tools": [],
             "tool_choice": "auto",
@@ -176,11 +175,13 @@ class RealtimeClient:
                 # Drop oldest audio if queue is full to prevent memory buildup
                 try:
                     self.audio_queue.get_nowait()
+                    log.debug("Dropped oldest audio chunk - queue full")
                 except asyncio.QueueEmpty:
                     pass
                     
             await self.audio_queue.put(audio_data)
             self._awaiting_commit = True
+            log.debug(f"Queued audio data: {len(audio_data)} bytes, queue_size: {self.audio_queue.qsize()}")
             
         except Exception as e:
             log.error(f"Error queuing audio data: {e}")
@@ -204,10 +205,13 @@ class RealtimeClient:
                     except Exception:
                         pass
                 else:
-                    # With server VAD and create_response: true, no manual commits needed
-                    # The server will automatically commit and create responses
-                    if self._awaiting_commit:
-                        self._awaiting_commit = False
+                    # Auto-commit only when we have at least 120ms buffered
+                    if self._awaiting_commit and self.session_active and self._buffered_ms >= 120.0:
+                        try:
+                            await self.commit_audio_buffer()
+                            await self.create_response()
+                        finally:
+                            self._awaiting_commit = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -356,9 +360,13 @@ class RealtimeClient:
                 log.debug("Speech stopped")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
-                # With server VAD and create_response: true, the server handles this automatically
-                # Reset buffered time as the server will have committed the audio
-                self._buffered_ms = 0.0
+                # Commit audio buffer and trigger response
+                try:
+                    if self._buffered_ms >= 120.0:
+                        await self.commit_audio_buffer()
+                        await self.create_response()
+                except Exception as e:
+                    log.error(f"Error finalizing response after speech: {e}")
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
@@ -445,8 +453,7 @@ class RealtimeClient:
             "type": "server_vad",
             "threshold": threshold,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": silence_duration_ms,
-            "create_response": True
+            "silence_duration_ms": silence_duration_ms
         }
         
         if self.session_active:
