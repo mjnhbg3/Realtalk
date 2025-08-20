@@ -836,7 +836,7 @@ class RealTalk(red_commands.Cog):
                     current_audio_source.put_audio(audio_data)
                     
                     # Start playback only when we have adequate buffer to prevent timing compensation
-                    # Use the AudioSource's ready_for_playback property (3+ frames = 60ms minimum)
+                    # Use the AudioSource's ready_for_playback property (5+ frames = 100ms minimum)
                     if (voice_client and not voice_client.is_playing() and 
                         current_audio_source.ready_for_playback):
                         voice_client.play(current_audio_source, after=_audio_finished)
