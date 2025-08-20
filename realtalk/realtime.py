@@ -372,21 +372,12 @@ class RealtimeClient:
                     self.on_conversation_item_created(event)
                     
             elif event_type == "response.audio.delta":
-                # Handle audio output with rate control to prevent buffer overflow
+                # Handle audio output
                 audio_b64 = event.get("delta")
                 if audio_b64 and self.on_audio_output:
                     try:
                         audio_data = base64.b64decode(audio_b64)
-                        
-                        # CRITICAL: Rate limiting to prevent overwhelming Discord's buffer
-                        current_time = time.time()
-                        if current_time - self._last_output_ts < 0.015:  # Minimum 15ms between chunks
-                            # If receiving too fast, add small delay
-                            await asyncio.sleep(0.010)  # 10ms delay
-                        
                         self.on_audio_output(audio_data)
-                        self._last_output_ts = current_time
-                        
                     except Exception as e:
                         log.error(f"Error processing audio delta: {e}")
                         

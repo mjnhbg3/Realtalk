@@ -87,7 +87,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         sample_rate: int = 48000, 
         channels: int = 2, 
         frame_size: int = 960,  # 20ms at 48kHz
-        max_queue_size: int = 6,  # ~120ms of audio - optimized for OpenAI response timing
+        max_queue_size: int = 10,  # ~200ms of audio - reverted to stable value
         volume: float = 1.0
     ):
         super().__init__()
@@ -111,7 +111,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         # Audio stream state tracking
         self.has_real_audio = False  # Track if we've received actual audio data
         self.stream_finished = False  # Track if stream is truly done
-        self.min_buffer_size = 2  # Minimum frames before allowing playback start (40ms)
+        self.min_buffer_size = 3  # Minimum frames before allowing playback start (60ms)
         self.timing_stable = False  # Track if timing has stabilized
         
         # Silence frame for padding
@@ -232,13 +232,12 @@ class PCMQueueAudioSource(discord.AudioSource):
                     idx += frame_bytes
 
                     if len(self.audio_queue) >= self.max_queue_size:
-                        # CRITICAL: Drop oldest frames instead of skipping new ones
-                        # This prevents buffer overflow while maintaining timing continuity
-                        dropped_frame = self.audio_queue.popleft()
+                        # Skip adding this frame to prevent timing issues
+                        # This maintains consistent timing without creating gaps
                         self.frames_dropped += 1
-                        if self.frames_dropped % 10 == 1:
-                            log.debug(f"Dropped oldest frame to prevent buffer overflow: queue size {self.max_queue_size}")
-                        # Continue to add the new frame below
+                        if self.frames_dropped % 10 == 1:  # Log less frequently to reduce spam
+                            log.debug(f"Skipped audio frame due to full queue: {self.max_queue_size}")
+                        continue  # Skip adding this frame
 
                     self.audio_queue.append(frame)
                     self.frames_queued += 1
@@ -254,29 +253,35 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.error(f"Error adding audio to queue: {e}")
 
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
-        """Convert 24kHz mono PCM16 to 48kHz stereo with proper sample rate conversion.
+        """Convert 24kHz mono PCM16 to 48kHz stereo using the original working method.
         
-        Uses proper 2x upsampling with anti-aliasing to prevent timing issues.
-        Critical for preventing Discord timing compensation.
+        Reverted to original linear interpolation approach that was working.
+        The sample duplication was causing double-speed playback issues.
         """
         try:
             if not audio_data:
                 return audio_data
 
-            # Convert to numpy array
-            mono_24k = np.frombuffer(audio_data, dtype=np.int16)
-            if mono_24k.size == 0:
+            # Convert to numpy array (keeping as float32 for interpolation)
+            mono = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            if mono.size == 0:
                 return b""
 
-            # CRITICAL: Proper 2x upsampling for 24kHz -> 48kHz
-            # Simple duplication method that maintains exact timing
-            # Each 24kHz sample becomes two identical 48kHz samples
-            mono_48k = np.repeat(mono_24k, 2)
-            
-            # Convert mono to stereo (duplicate channel)
-            stereo_48k = np.column_stack((mono_48k, mono_48k)).reshape(-1)
-            
-            return stereo_48k.astype(np.int16).tobytes()
+            # Revert to original linear interpolation 2x upsampling
+            # This was working before - the issue wasn't the sample rate conversion
+            up_len = mono.size * 2
+            up = np.empty(up_len, dtype=np.float32)
+            up[0::2] = mono
+            # For the inserted samples, average with previous sample; for the last sample, repeat
+            up[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
+            up[-1] = mono[-1]
+
+            # Duplicate to stereo (L=R)
+            stereo = np.column_stack((up, up)).reshape(-1)
+
+            # Cast back to int16 with clipping
+            np.clip(stereo, -32768, 32767, out=stereo)
+            return stereo.astype(np.int16).tobytes()
             
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
