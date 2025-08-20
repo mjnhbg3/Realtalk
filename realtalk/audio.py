@@ -107,7 +107,10 @@ class PCMQueueAudioSource(discord.AudioSource):
         self.frames_played = 0
         self.frames_queued = 0
         self.frames_dropped = 0
-        self.has_real_audio = False  # Track if we have actual audio vs just silence
+        
+        # Audio stream state tracking
+        self.has_real_audio = False  # Track if we've received actual audio data
+        self.stream_finished = False  # Track if stream is truly done
         
         # Silence frame for padding
         self.silence_frame = self._create_silence_frame()
@@ -150,7 +153,7 @@ class PCMQueueAudioSource(discord.AudioSource):
                     return audio_data
                 else:
                     # Check if we should truly end the stream or just return silence
-                    if self.should_end_stream:
+                    if self.stream_finished:
                         # Return empty bytes to end stream - only when we're truly done
                         self.underrun_count += 1
                         if self.underrun_count % 50 == 1:  # Log underruns occasionally
@@ -195,6 +198,10 @@ class PCMQueueAudioSource(discord.AudioSource):
         """
         if not audio_data:
             return
+            
+        # Track that we have received actual audio data
+        self.has_real_audio = True
+        self.stream_finished = False  # Reset finished state when new audio arrives
             
         try:
             # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord using linear upsampling
@@ -270,7 +277,12 @@ class PCMQueueAudioSource(discord.AudioSource):
         """Reset internal streaming state (used when a new response starts)."""
         self._leftover = b""
         self.has_real_audio = False
+        self.stream_finished = False
         self.clear_queue()
+    
+    def finish_stream(self):
+        """Signal that the audio stream is complete and should end."""
+        self.stream_finished = True
     
     def interrupt_playback(self):
         """Immediately interrupt playback for user interruptions."""

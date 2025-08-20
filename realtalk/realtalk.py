@@ -876,13 +876,13 @@ class RealTalk(red_commands.Cog):
                     pass
             
             def _on_resp_done():
-                # Response completed - mark that we're done receiving audio for this response
+                # Response completed - signal that the stream should end when queue empties
                 try:
                     nonlocal current_audio_source
                     if current_audio_source:
-                        # Mark that we can end the stream when the queue empties
-                        current_audio_source.has_real_audio = True
-                        log.debug("Response completed - audio stream can end when queue empties")
+                        # Signal that we're done sending audio - stream can end when queue empties
+                        current_audio_source.finish_stream()
+                        log.debug("Response completed - marked stream for completion")
                 except Exception:
                     pass
             
