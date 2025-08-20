@@ -821,7 +821,7 @@ class RealTalk(red_commands.Cog):
                 current_audio_source = None
                 self.sessions[guild_id]["current_audio_source"] = None
             
-            # Set up audio output callback: enqueue and start playback on demand
+            # Set up audio output callback: enqueue and start playback with proper timing
             def _handle_audio_output(audio_data: bytes):
                 try:
                     nonlocal current_audio_source
@@ -831,14 +831,16 @@ class RealTalk(red_commands.Cog):
                         current_audio_source = PCMQueueAudioSource()
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
-                        
-                        # Start playback immediately - Discord's timing will handle buffering
-                        if voice_client:
-                            voice_client.play(current_audio_source, after=_audio_finished)
-                            log.debug("Started Discord audio playback immediately with fresh source")
                     
-                    # Queue audio data for playback
+                    # Always queue audio data first
                     current_audio_source.put_audio(audio_data)
+                    
+                    # Start playback only when we have a small buffer (3-5 frames = 60-100ms)
+                    # This prevents Discord timing compensation while maintaining low latency
+                    if (voice_client and not voice_client.is_playing() and 
+                        current_audio_source.queue_size >= 3):
+                        voice_client.play(current_audio_source, after=_audio_finished)
+                        log.debug(f"Started Discord audio playback with {current_audio_source.queue_size} frames buffered")
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
@@ -866,18 +868,23 @@ class RealTalk(red_commands.Cog):
             def _on_resp_start():
                 try:
                     nonlocal current_audio_source
-                    # Stop current playback to prepare for new response
-                    if current_audio_source and voice_client and voice_client.is_playing():
-                        voice_client.stop()
-                        log.debug("Stopped current audio for new response")
-                    # Audio source will be created fresh when new audio data arrives
+                    # Reset the audio source state to clear any leftover data
+                    if current_audio_source:
+                        current_audio_source.reset_state()
+                        log.debug("Reset audio source state for new response")
                 except Exception:
                     pass
             
             def _on_resp_done():
-                # Response completed - audio source will continue until next response
-                log.debug("Response completed")
-                pass
+                # Response completed - mark that we're done receiving audio for this response
+                try:
+                    nonlocal current_audio_source
+                    if current_audio_source:
+                        # Mark that we can end the stream when the queue empties
+                        current_audio_source.has_real_audio = True
+                        log.debug("Response completed - audio stream can end when queue empties")
+                except Exception:
+                    pass
             
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
             realtime_client.on_input_audio_buffer_speech_stopped = _on_speech_stopped

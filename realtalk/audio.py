@@ -107,6 +107,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         self.frames_played = 0
         self.frames_queued = 0
         self.frames_dropped = 0
+        self.has_real_audio = False  # Track if we have actual audio vs just silence
         
         # Silence frame for padding
         self.silence_frame = self._create_silence_frame()
@@ -129,7 +130,7 @@ class PCMQueueAudioSource(discord.AudioSource):
         Read next audio frame for Discord playback.
         
         Returns:
-            bytes: PCM audio data for one frame (20ms)
+            bytes: PCM audio data for one frame (20ms) or silence to maintain timing
         """
         try:
             with self.queue_lock:
@@ -148,12 +149,20 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # Return empty bytes to properly end the stream when no audio available
-                    # This stops Discord from thinking we're still talking
-                    self.underrun_count += 1
-                    if self.underrun_count % 50 == 1:  # Log underruns occasionally
-                        log.debug(f"Audio underrun #{self.underrun_count} - ending stream")
-                    return b''
+                    # Check if we should truly end the stream or just return silence
+                    if self.should_end_stream:
+                        # Return empty bytes to end stream - only when we're truly done
+                        self.underrun_count += 1
+                        if self.underrun_count % 50 == 1:  # Log underruns occasionally
+                            log.debug(f"Audio underrun #{self.underrun_count} - ending stream")
+                        return b''
+                    else:
+                        # Return SILENCE to maintain stream timing while waiting for more audio
+                        # This prevents Discord from ending the stream and keeps timing consistent
+                        self.underrun_count += 1
+                        if self.underrun_count % 50 == 1:  # Log underruns occasionally
+                            log.debug(f"Audio underrun #{self.underrun_count} - returning silence to maintain timing")
+                        return self.silence_frame
                     
         except Exception as e:
             log.error(f"Error reading audio frame: {e}")
@@ -190,6 +199,9 @@ class PCMQueueAudioSource(discord.AudioSource):
         try:
             # Convert OpenAI PCM (likely 24k mono) to 48k stereo for Discord using linear upsampling
             processed_data = self._to_48k_stereo(audio_data)
+            
+            # Mark that we now have real audio content
+            self.has_real_audio = True
 
             # Accumulate data to produce exact frame-sized chunks (avoid crackles between deltas)
             with self.queue_lock:
@@ -257,6 +269,7 @@ class PCMQueueAudioSource(discord.AudioSource):
     def reset_state(self):
         """Reset internal streaming state (used when a new response starts)."""
         self._leftover = b""
+        self.has_real_audio = False
         self.clear_queue()
     
     def interrupt_playback(self):
@@ -310,6 +323,7 @@ class PCMQueueAudioSource(discord.AudioSource):
             dropped = len(self.audio_queue)
             self.audio_queue.clear()
             self.frames_dropped += dropped
+            self.has_real_audio = False
             
         log.debug(f"Audio queue cleared ({dropped} frames dropped)")
 
@@ -334,6 +348,14 @@ class PCMQueueAudioSource(discord.AudioSource):
         """Check if audio queue is empty."""
         with self.queue_lock:
             return len(self.audio_queue) == 0
+    
+    @property
+    def should_end_stream(self) -> bool:
+        """Check if we should end the audio stream (return empty bytes)."""
+        with self.queue_lock:
+            # Only end stream if we have no audio AND we never had real audio in this session
+            # OR if we explicitly stopped the source
+            return (len(self.audio_queue) == 0 and not self.has_real_audio) or not self.is_playing
 
     def get_stats(self) -> dict:
         """Get audio source statistics."""
