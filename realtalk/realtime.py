@@ -263,6 +263,7 @@ class RealtimeClient:
             if self._response_active:
                 await self._send_message({"type": "response.cancel"})
                 self._response_active = False
+                log.debug("Response cancellation sent to OpenAI")
         except Exception as e:
             log.error(f"Error canceling response: {e}")
 
@@ -341,14 +342,16 @@ class RealtimeClient:
                         pass
 
             elif event_type == "input_audio_buffer.speech_started":
-                log.debug("Speech started")
+                log.debug("Speech started - interrupting bot")
                 if self.on_input_audio_buffer_speech_started:
                     self.on_input_audio_buffer_speech_started()
-                # Attempt to cancel any ongoing response for barge-in
+                # Immediately cancel any ongoing response for barge-in
                 try:
-                    await self.cancel_response()
-                except Exception:
-                    pass
+                    if self._response_active:
+                        await self.cancel_response()
+                        log.debug("Cancelled ongoing response due to user speech")
+                except Exception as e:
+                    log.error(f"Error cancelling response: {e}")
                     
             elif event_type == "input_audio_buffer.speech_stopped":
                 log.debug("Speech stopped")

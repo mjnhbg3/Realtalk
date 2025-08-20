@@ -820,15 +820,37 @@ class RealTalk(red_commands.Cog):
                     pass
 
             realtime_client.on_audio_output = _handle_audio_output
+            
+            # Handle user interruptions - immediate audio cutoff
+            def _on_speech_started():
+                try:
+                    # Immediately stop Discord playback
+                    if voice_client and voice_client.is_playing():
+                        voice_client.stop()
+                    # Clear audio buffers to prevent continuation
+                    audio_source.interrupt_playback()
+                except Exception as e:
+                    log.error(f"Error handling speech interruption: {e}")
+            
+            def _on_speech_stopped():
+                # Speech ended - ready for bot response
+                pass
+            
             # Reset playback state on response boundaries
             def _on_resp_start():
                 try:
-                    audio_source.reset_state()
+                    # Only reset if not already interrupted
+                    if not voice_client or not voice_client.is_playing():
+                        audio_source.reset_state()
                 except Exception:
                     pass
+            
             def _on_resp_done():
-                # No action needed; queue will drain and player will stop
+                # Response completed
                 pass
+            
+            realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
+            realtime_client.on_input_audio_buffer_speech_stopped = _on_speech_stopped
             realtime_client.on_response_started = _on_resp_start
             realtime_client.on_response_done = _on_resp_done
             

@@ -245,6 +245,11 @@ class PCMQueueAudioSource(discord.AudioSource):
         """Reset internal streaming state (used when a new response starts)."""
         self._leftover = b""
         self.clear_queue()
+    
+    def interrupt_playback(self):
+        """Immediately interrupt playback for user interruptions."""
+        self.stop()
+        self.reset_state()
 
     def _split_into_frames(self, audio_data: bytes) -> list:
         """Split audio data into Discord-compatible frames."""
