@@ -831,15 +831,14 @@ class RealTalk(red_commands.Cog):
                         current_audio_source = PCMQueueAudioSource()
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
-                    
-                    # Always queue audio first
-                    current_audio_source.put_audio(audio_data)
-                    
-                    # Start playback only after we have some audio buffered (prevents fast playback)
-                    if not voice_client.is_playing() and current_audio_source.queue_size >= 3:
+                        
+                        # Start playback immediately - Discord's timing will handle buffering
                         if voice_client:
                             voice_client.play(current_audio_source, after=_audio_finished)
-                            log.debug("Started Discord audio playback after buffering 3 frames")
+                            log.debug("Started Discord audio playback immediately with fresh source")
+                    
+                    # Queue audio data for playback
+                    current_audio_source.put_audio(audio_data)
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
