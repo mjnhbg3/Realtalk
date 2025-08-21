@@ -491,10 +491,12 @@ class RateLimitedAudioSource(discord.AudioSource):
         making the audio source behave like a live microphone feed rather than a pre-buffered file.
         """
         log.debug("Starting audio pacing loop")
+        loop = asyncio.get_event_loop()
         
         while self.rate_limit_enabled and not self._stop_pacing:
             try:
-                loop_start_time = time.time()
+                # Use event loop's monotonic time instead of system time to prevent heartbeat blocking
+                loop_start_time = loop.time()
                 
                 # Calculate expected frame time based on playback position
                 if self.playback_start_time is None:
@@ -503,9 +505,8 @@ class RateLimitedAudioSource(discord.AudioSource):
                 expected_frame_time = (self.playback_start_time + 
                                      self.frames_delivered * self.target_frame_interval)
                 
-                # Wait until it's time for the next frame
-                current_time = time.time()
-                sleep_duration = expected_frame_time - current_time
+                # Wait until it's time for the next frame using cached time
+                sleep_duration = expected_frame_time - loop_start_time
                 
                 # Only sleep if we're ahead of schedule
                 if sleep_duration > 0:
@@ -515,7 +516,7 @@ class RateLimitedAudioSource(discord.AudioSource):
                 elif sleep_duration < -0.1:  # More than 100ms behind
                     # We're falling behind - log and reset timing to prevent drift
                     log.debug(f"Audio pacing falling behind by {-sleep_duration:.3f}s - resetting timing")
-                    self.playback_start_time = current_time
+                    self.playback_start_time = loop_start_time
                     self.frames_delivered = 0
                     self.rate_control_stats['timing_errors'] += 1
                 
@@ -538,8 +539,12 @@ class RateLimitedAudioSource(discord.AudioSource):
                     # The underlying PCM source will handle silence frames
                     pass
                 
-                # Track actual loop timing for debugging
-                self.last_frame_time = time.time()
+                # Track actual loop timing for debugging using event loop time
+                self.last_frame_time = loop.time()
+                
+                # Explicit yield point to prevent event loop blocking
+                if self.frames_delivered % 10 == 0:  # Every 200ms
+                    await asyncio.sleep(0)
                 
             except asyncio.CancelledError:
                 log.debug("Audio pacing loop cancelled")
@@ -598,7 +603,13 @@ class RateLimitedAudioSource(discord.AudioSource):
         """Start rate-limited audio delivery."""
         if self.rate_limit_enabled and (self.pacing_task is None or self.pacing_task.done()):
             self._stop_pacing = False
-            self.playback_start_time = time.time()
+            # Use event loop time instead of system time
+            try:
+                loop = asyncio.get_event_loop()
+                self.playback_start_time = loop.time()
+            except RuntimeError:
+                # Fallback if no event loop is running
+                self.playback_start_time = time.time()
             self.frames_delivered = 0
             self.pacing_task = asyncio.create_task(self._audio_pacing_loop())
             log.debug("Started clock-based audio pacing")

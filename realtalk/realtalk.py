@@ -52,8 +52,8 @@ class RealTalk(red_commands.Cog):
             # New configurable options
             "voice": "Alloy",
             "system_prompt": "You are a helpful AI assistant having a voice conversation. Be conversational, concise, and natural. Respond as if you're talking to a friend.",
-            "server_vad_threshold": 0.5,
-            "server_vad_silence_ms": 300,
+            "server_vad_threshold": 0.3,
+            "server_vad_silence_ms": 500,
             "transcribe_model": "gpt-4o-mini-transcribe",
             "noise_mode": "near",  # none|near|far
             "mix_multiple": True,

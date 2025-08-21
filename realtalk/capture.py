@@ -276,13 +276,16 @@ class VoiceCapture:
                         except Exception:
                             last_any = 0.0
 
-                    # If we sent audio recently but now silent beyond threshold, commit + create response
-                    if self._sent_since_commit and last_any and (current_time - last_any) >= (self.silence_threshold / 1000.0):
+                    # More aggressive fallback - reduced silence threshold and added logging
+                    silence_threshold_ms = max(800, self.silence_threshold)  # Use at least 800ms
+                    if self._sent_since_commit and last_any and (current_time - last_any) >= (silence_threshold_ms / 1000.0):
+                        log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence")
                         await self.realtime_client.commit_audio_buffer()
                         await self.realtime_client.create_response()
                         self._sent_since_commit = False
-                except Exception:
-                    pass
+                        log.info("🔄 Manual response generation requested")
+                except Exception as e:
+                    log.error(f"Error in client-side fallback: {e}")
 
                 # Performance monitoring
                 self._update_performance_stats(current_time)

@@ -115,7 +115,7 @@ class RealtimeClient:
                     )
                 
                 self.connected = True
-                log.info("Successfully connected to OpenAI Realtime API")
+                log.info("✅ Successfully connected to OpenAI Realtime API")
                 
                 # Start background tasks
                 self.audio_task = asyncio.create_task(self._audio_streaming_task())
@@ -123,6 +123,7 @@ class RealtimeClient:
                 
                 # Initialize session
                 await self._initialize_session()
+                log.info(f"🔧 Session config: {self.session_config}")
                 
                 return True
                 
@@ -335,6 +336,7 @@ class RealtimeClient:
                 log.info("Session updated successfully")
                 
             elif event_type == "response.created":
+                log.info("✅ OpenAI response generation started")
                 if self.on_response_started:
                     try:
                         self.on_response_started()
@@ -342,19 +344,19 @@ class RealtimeClient:
                         pass
 
             elif event_type == "input_audio_buffer.speech_started":
-                log.debug("Speech started - interrupting bot")
+                log.info("🎤 Server VAD detected speech START")
                 if self.on_input_audio_buffer_speech_started:
                     self.on_input_audio_buffer_speech_started()
                 # Immediately cancel any ongoing response for barge-in
                 try:
                     if self._response_active:
                         await self.cancel_response()
-                        log.debug("Cancelled ongoing response due to user speech")
+                        log.info("Cancelled ongoing response due to user speech")
                 except Exception as e:
                     log.error(f"Error cancelling response: {e}")
                     
             elif event_type == "input_audio_buffer.speech_stopped":
-                log.debug("Speech stopped - OpenAI will handle response generation")
+                log.info("🔇 Server VAD detected speech STOP - should trigger response")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
                 # With create_response: true, OpenAI automatically commits and generates response
@@ -371,9 +373,15 @@ class RealtimeClient:
                 if audio_b64 and self.on_audio_output:
                     try:
                         audio_data = base64.b64decode(audio_b64)
+                        log.info(f"🔊 Received audio delta: {len(audio_data)} bytes")
                         self.on_audio_output(audio_data)
                     except Exception as e:
                         log.error(f"Error processing audio delta: {e}")
+                else:
+                    if not audio_b64:
+                        log.warning("❌ Received response.audio.delta with no audio data")
+                    if not self.on_audio_output:
+                        log.warning("❌ No audio output handler configured")
                         
             elif event_type == "response.audio_transcript.done":
                 transcript = event.get("transcript", "")
@@ -386,7 +394,7 @@ class RealtimeClient:
                 # Audio streaming for this response is complete
                     
             elif event_type == "response.done":
-                log.debug("Response completed")
+                log.info("✅ Response completed")
                 self._response_active = False
                 if self.on_response_done:
                     try:
