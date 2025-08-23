@@ -250,6 +250,27 @@ class PCMQueueAudioSource(discord.AudioSource):
         except Exception as e:
             log.error(f"Error adding audio to queue: {e}")
 
+    def put_48k_stereo_frame(self, frame: bytes):
+        """Directly enqueue a single 20ms 48kHz stereo PCM16 frame (3840 bytes)."""
+        try:
+            if not frame:
+                return
+            frame_bytes = self.frame_size * self.channels * 2
+            # Normalize frame length: pad or truncate as needed to exactly one frame
+            if len(frame) < frame_bytes:
+                frame = frame + b"\x00" * (frame_bytes - len(frame))
+            elif len(frame) > frame_bytes:
+                frame = frame[:frame_bytes]
+
+            with self.queue_lock:
+                if len(self.audio_queue) >= self.max_queue_size:
+                    self.audio_queue.popleft()
+                    self.frames_dropped += 1
+                self.audio_queue.append(frame)
+                self.frames_queued += 1
+        except Exception as e:
+            log.error(f"Error enqueuing 48k stereo frame: {e}")
+
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
         """Convert OpenAI PCM16 to 48kHz stereo.
         
@@ -520,10 +541,54 @@ class RateLimitedAudioSource(discord.AudioSource):
             'timing_errors': 0,
             'buffer_overruns': 0
         }
+
+        # Internal 24kHz mono PCM buffer so we can emit one 20ms frame per tick
+        self._pcm24_buffer = bytearray()
+
+        # Cached sizes
+        self._pcm24_frame_bytes = 480 * 2  # 480 samples @24kHz mono, 16-bit
+        self._pcm48_frame_bytes = frame_size * channels * 2  # 3840 bytes
         
         log.info(f"RateLimitedAudioSource initialized: rate_limit={rate_limit_enabled}, "
                 f"target_buffer={target_buffer_ms}ms")
     
+    def _pump_one_20ms_frame(self) -> bool:
+        """Convert one 20ms 24kHz mono slice to 48kHz stereo and enqueue it.
+
+        Returns True if a frame was produced and queued, False otherwise.
+        """
+        try:
+            # Ensure we have at least 20ms of 24kHz PCM available
+            while len(self._pcm24_buffer) < self._pcm24_frame_bytes:
+                try:
+                    chunk = self.pacing_queue.get_nowait()
+                    if chunk:
+                        self._pcm24_buffer.extend(chunk)
+                except asyncio.QueueEmpty:
+                    break
+
+            if len(self._pcm24_buffer) < self._pcm24_frame_bytes:
+                return False
+
+            # Take exactly one 20ms 24kHz mono slice
+            slice24 = self._pcm24_buffer[:self._pcm24_frame_bytes]
+            del self._pcm24_buffer[:self._pcm24_frame_bytes]
+
+            # Convert to one 20ms 48kHz stereo frame and enqueue directly
+            frame48 = self.pcm_source._to_48k_stereo(slice24)
+            # Ensure exact frame size
+            if len(frame48) != self._pcm48_frame_bytes:
+                # Normalize by pad/truncate just in case
+                if len(frame48) < self._pcm48_frame_bytes:
+                    frame48 = frame48 + b"\x00" * (self._pcm48_frame_bytes - len(frame48))
+                else:
+                    frame48 = frame48[:self._pcm48_frame_bytes]
+            self.pcm_source.put_48k_stereo_frame(frame48)
+            return True
+        except Exception as e:
+            log.error(f"Error pumping 20ms frame: {e}")
+            return False
+
     async def _audio_pacing_loop(self):
         """
         Clock-based audio pacing loop that delivers audio chunks at real-time speed.
@@ -561,24 +626,14 @@ class RateLimitedAudioSource(discord.AudioSource):
                     self.frames_delivered = 0
                     self.rate_control_stats['timing_errors'] += 1
                 
-                # Deliver queued audio to PCM source if available
-                try:
-                    # Use get_nowait() to avoid blocking the pacing loop
-                    audio_chunk = self.pacing_queue.get_nowait()
-                    self.pcm_source.put_audio(audio_chunk)
+                # Deliver exactly one 20ms frame if available
+                if self._pump_one_20ms_frame():
                     self.frames_delivered += 1
                     self.rate_control_stats['frames_paced'] += 1
-                    
-                    # Log progress occasionally
-                    if self.frames_delivered % 50 == 0:  # Every 1 second  
-                        queue_size = self.pacing_queue.qsize()
+                    if self.frames_delivered % 50 == 0:  # Every 1 second
+                        q_frames = self.pacing_queue.qsize()
                         log.debug(f"Rate control: {self.frames_delivered} frames paced, "
-                                f"{queue_size} frames queued ({queue_size * 20}ms)")
-                    
-                except asyncio.QueueEmpty:
-                    # No audio available - this is normal during gaps
-                    # The underlying PCM source will handle silence frames
-                    pass
+                                  f"{q_frames} chunks queued")
                 
                 # Track actual loop timing for debugging using event loop time
                 self.last_frame_time = loop.time()
@@ -693,43 +748,49 @@ class RateLimitedAudioSource(discord.AudioSource):
     
     def put_audio(self, audio_data: bytes):
         """Add audio data - routes through rate limiting if enabled."""
+        # Always queue to pacing buffer; delivery decides pacing strategy
+        self.queue_audio_for_pacing(audio_data)
         if self.rate_limit_enabled:
-            self.queue_audio_for_pacing(audio_data)
+            if not self.pacing_task or self.pacing_task.done():
+                self.start_pacing()
         else:
-            # Even without rate limiting, we need basic pacing for Discord
-            # Queue the audio and start a simple delivery task
-            self.queue_audio_for_pacing(audio_data)
+            # Even without full rate limiting, deliver at real-time cadence
             if not self.pacing_task or self.pacing_task.done():
                 self.pacing_task = asyncio.create_task(self._simple_audio_delivery())
     
     async def _simple_audio_delivery(self):
-        """Simple audio delivery without complex rate limiting."""
-        log.debug("Starting simple audio delivery")
-        
-        while True:
-            try:
-                # Get audio from pacing queue with a short timeout
+        """Simple pacing at 20ms without advanced buffering logic."""
+        log.debug("Starting simple 20ms audio pacing")
+        next_time = asyncio.get_event_loop().time()
+        try:
+            while True:
+                # Try to fill buffer if low
                 try:
-                    audio_chunk = await asyncio.wait_for(
-                        self.pacing_queue.get(), timeout=0.1
-                    )
-                    # Deliver immediately to PCM source
-                    self.pcm_source.put_audio(audio_chunk)
-                    
-                    # Small delay to prevent overwhelming Discord (much smaller than rate limiting)
-                    await asyncio.sleep(0.005)  # 5ms delay between chunks
-                    
+                    chunk = await asyncio.wait_for(self.pacing_queue.get(), timeout=0.05)
+                    if chunk:
+                        self._pcm24_buffer.extend(chunk)
                 except asyncio.TimeoutError:
-                    # No audio available - check if we should continue
-                    if self.pacing_queue.qsize() == 0:
-                        # No more audio, exit delivery loop
-                        break
-                        
-            except Exception as e:
-                log.error(f"Error in simple audio delivery: {e}")
-                break
-        
-        log.debug("Simple audio delivery stopped")
+                    pass
+
+                # Produce at most one frame per 20ms tick
+                produced = self._pump_one_20ms_frame()
+
+                # Exit if nothing left to do
+                if not produced and self.pacing_queue.qsize() == 0 and len(self._pcm24_buffer) == 0:
+                    break
+
+                # Sleep to maintain ~20ms cadence
+                next_time += 0.02
+                delay = next_time - asyncio.get_event_loop().time()
+                if delay > 0:
+                    await asyncio.sleep(min(delay, 0.02))
+                else:
+                    # If we're behind, reset schedule to now to avoid drift
+                    next_time = asyncio.get_event_loop().time()
+        except Exception as e:
+            log.error(f"Error in simple audio delivery: {e}")
+        finally:
+            log.debug("Simple audio pacing stopped")
     
     def reset_state(self):
         """Reset internal streaming state."""
