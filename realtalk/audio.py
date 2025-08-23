@@ -286,21 +286,25 @@ class PCMQueueAudioSource(discord.AudioSource):
                 return b""
             
             # Vectorized 2x linear interpolation: 24kHz → 48kHz
-            samples = mono.size
-            input_samples = samples
+            input_samples = mono.size
             output_samples = input_samples * 2
-            upsampled = np.empty(output_samples, dtype=np.float32)
-            upsampled[0::2] = mono
+            # Interpolate in int16 domain to avoid float precision weirdness
+            src = mono.astype(np.int32)
+            up = np.empty(output_samples, dtype=np.int32)
+            up[0::2] = src
             if input_samples > 1:
-                upsampled[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
-                upsampled[-1] = mono[-1]
+                up[1:-1:2] = ((src[:-1] + src[1:]) // 2)
+                up[-1] = src[-1]
             else:
-                upsampled[1] = mono[0]
-            
-            # Convert to stereo
-            stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
-            np.clip(stereo, -32768, 32767, out=stereo)
-            result = stereo.astype(np.int16).tobytes()
+                up[1] = src[0]
+
+            # Interleave to stereo L,R,L,R as int16
+            stereo_i16 = np.empty(output_samples * 2, dtype=np.int16)
+            # Clip to int16 range before casting
+            up_clipped = np.clip(up, -32768, 32767).astype(np.int16)
+            stereo_i16[0::2] = up_clipped  # Left
+            stereo_i16[1::2] = up_clipped  # Right (duplicate)
+            result = stereo_i16.tobytes()
             
             # Verify the math
             # Optional duration check for debugging (downgraded to debug to reduce spam)

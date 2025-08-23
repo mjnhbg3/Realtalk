@@ -1003,39 +1003,8 @@ class RealTalk(red_commands.Cog):
                     log.error(f"Error handling speech interruption: {e}")
             
             def _on_speech_stopped():
-                # Speech ended - ready for bot response
-                try:
-                    if wake_enabled:
-                        # Run wake-word check via Whisper on recent buffered audio
-                        async def _wake_and_trigger():
-                            try:
-                                # Grab recent audio from capture as WAV
-                                wav = voice_capture.get_recent_audio_wav(seconds=wake_recent_secs, sample_rate=48000)
-                                if not wav:
-                                    return
-                                transcript = await self._whisper_transcribe(await self._get_openai_api_key(), wav, model=wake_model, language=wake_lang)
-                                t = (transcript or "").lower()
-                                match = any(w in t for w in wake_words if w)
-                                if match:
-                                    # Temporarily allow creating a response
-                                    try:
-                                        setattr(realtime_client, "_response_active", False)
-                                    except Exception:
-                                        pass
-                                    # Commit and create a response for this utterance
-                                    await realtime_client.commit_audio_buffer()
-                                    await realtime_client.create_response()
-                                else:
-                                    # Keep fallback suppressed by staying in active state
-                                    try:
-                                        setattr(realtime_client, "_response_active", True)
-                                    except Exception:
-                                        pass
-                            except Exception as e:
-                                log.error(f"Wake-word whisper check failed: {e}")
-                        asyncio.create_task(_wake_and_trigger())
-                except Exception:
-                    pass
+                # In wake mode we rely on the local wake watcher; otherwise no-op
+                return
             
             # Reset playback state on response boundaries
             def _on_resp_start():
@@ -1190,6 +1159,7 @@ class RealTalk(red_commands.Cog):
             api_key = await self._get_openai_api_key()
             
             speaking = False
+            speech_start = 0.0
             last_any = 0.0
             while guild_id in self.sessions:
                 # Determine latest activity time
@@ -1204,16 +1174,28 @@ class RealTalk(red_commands.Cog):
                 # Transition detection
                 if recently_active and not speaking:
                     speaking = True
+                    speech_start = now
                 elif speaking and (now - last_any) >= (silence_ms / 1000.0):
                     # Speaking just stopped according to local timer → gate with Whisper
                     speaking = False
                     try:
-                        wav = voice_capture.get_recent_audio_wav(seconds=wake_recent_secs, sample_rate=48000)
+                        # Use only the segment since speech_start (+ small pre-roll), bounded by wake_recent_secs
+                        seg_secs = max(0.8, min(wake_recent_secs, max(0.0, now - speech_start) + 0.3))
+                        wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
                         if not wav:
                             continue
                         transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang)
-                        t = (transcript or "").lower()
-                        if any(w in t for w in wake_words if w):
+                        t = (transcript or "").lower().strip()
+                        # Only accept wake phrase if found and appears early (within first 60% of text)
+                        match = False
+                        for w in wake_words:
+                            if not w:
+                                continue
+                            idx = t.find(w)
+                            if idx != -1 and idx <= max(5, int(len(t) * 0.6)):
+                                match = True
+                                break
+                        if match:
                             # Allow response then trigger
                             try:
                                 setattr(realtime_client, "_response_active", False)
