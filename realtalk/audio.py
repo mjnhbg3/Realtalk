@@ -285,35 +285,17 @@ class PCMQueueAudioSource(discord.AudioSource):
             if mono.size == 0:
                 return b""
             
-            # DEBUG: Log sample information to diagnose the speed issue
+            # Vectorized 2x linear interpolation: 24kHz → 48kHz
             samples = mono.size
-            duration_at_24k = (samples / 24000.0) * 1000  # Duration if this is 24kHz
-            log.info(f"🎵 Audio chunk: {len(audio_data)} bytes, {samples} samples, "
-                     f"{duration_at_24k:.1f}ms @ 24kHz")
-
-            # CORRECT UPSAMPLING: 24kHz → 48kHz means we need 2x the samples
-            # Each input sample at 24kHz needs to become TWO output samples at 48kHz
-            # to maintain the same time duration
-            
-            # Method: Linear interpolation (better quality than duplication)
-            input_samples = mono.size
-            output_samples = input_samples * 2  # Double the samples for 2x sample rate
-            
-            # Create output array
-            upsampled = np.zeros(output_samples, dtype=np.float32)
-            
-            # Linear interpolation: each input sample maps to two output samples
-            for i in range(input_samples):
-                # Direct copy of input sample
-                upsampled[i * 2] = mono[i]
-                
-                # Interpolated sample (average with next, or repeat last)
-                if i < input_samples - 1:
-                    upsampled[i * 2 + 1] = (mono[i] + mono[i + 1]) / 2.0
-                else:
-                    upsampled[i * 2 + 1] = mono[i]  # Repeat last sample
-            
-            log.info(f"🎵 Upsampled: {input_samples} samples @ 24kHz → {output_samples} samples @ 48kHz")
+            input_samples = samples
+            output_samples = input_samples * 2
+            upsampled = np.empty(output_samples, dtype=np.float32)
+            upsampled[0::2] = mono
+            if input_samples > 1:
+                upsampled[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
+                upsampled[-1] = mono[-1]
+            else:
+                upsampled[1] = mono[0]
             
             # Convert to stereo
             stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
@@ -321,28 +303,16 @@ class PCMQueueAudioSource(discord.AudioSource):
             result = stereo.astype(np.int16).tobytes()
             
             # Verify the math
-            input_duration_ms = (input_samples / 24000.0) * 1000
-            output_duration_ms = (output_samples / 48000.0) * 1000
-            log.info(f"🎵 Duration check: input {input_duration_ms:.1f}ms @ 24kHz = output {output_duration_ms:.1f}ms @ 48kHz")
+            # Optional duration check for debugging (downgraded to debug to reduce spam)
+            if False:
+                input_duration_ms = (input_samples / 24000.0) * 1000
+                output_duration_ms = (output_samples / 48000.0) * 1000
+                log.debug(f"Audio: {len(audio_data)}B → upsampled {input_samples}->{output_samples} "
+                          f"({input_duration_ms:.1f}ms→{output_duration_ms:.1f}ms)")
             
             return result
 
-            # Original 24kHz -> 48kHz linear interpolation 2x upsampling
-            up_len = mono.size * 2
-            up = np.empty(up_len, dtype=np.float32)
-            up[0::2] = mono
-            # For the inserted samples, average with previous sample; for the last sample, repeat
-            up[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
-            up[-1] = mono[-1]
-
-            # Duplicate to stereo (L=R)
-            stereo = np.column_stack((up, up)).reshape(-1)
-
-            # Cast back to int16 with clipping
-            np.clip(stereo, -32768, 32767, out=stereo)
-            result = stereo.astype(np.int16).tobytes()
-            log.debug(f"With 2x upsampling: {len(result)} bytes output")
-            return result
+            # Dead code below (kept for reference previously) removed in favor of vectorized path
             
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
@@ -629,14 +599,21 @@ class RateLimitedAudioSource(discord.AudioSource):
                     self.frames_delivered = 0
                     self.rate_control_stats['timing_errors'] += 1
                 
-                # Deliver exactly one 20ms frame if available
-                if self._pump_one_20ms_frame():
+                # Deliver frames to maintain a small PCM buffer ahead of consumption
+                desired_frames = min(15, max(self.pcm_source.min_buffer_size, self.target_buffer_ms // 20))
+                produced_any = False
+                produced_this_tick = 0
+                while self.pcm_source.queue_size < desired_frames and produced_this_tick < 3:
+                    if not self._pump_one_20ms_frame():
+                        break
+                    produced_any = True
+                    produced_this_tick += 1
                     self.frames_delivered += 1
                     self.rate_control_stats['frames_paced'] += 1
-                    if self.frames_delivered % 50 == 0:  # Every 1 second
-                        q_frames = self.pacing_queue.qsize()
-                        log.debug(f"Rate control: {self.frames_delivered} frames paced, "
-                                  f"{q_frames} chunks queued")
+                if self.frames_delivered % 50 == 0:  # Every ~1s if active
+                    q_frames = self.pacing_queue.qsize()
+                    log.debug(f"Pacer: delivered={self.frames_delivered}, pcm_queue={self.pcm_source.queue_size}, "
+                              f"pacing_chunks={q_frames}")
                 
                 # Track actual loop timing for debugging using event loop time
                 self.last_frame_time = loop.time()
@@ -777,16 +754,26 @@ class RateLimitedAudioSource(discord.AudioSource):
         next_time = asyncio.get_event_loop().time()
         try:
             while True:
-                # Try to fill buffer if low
-                try:
-                    chunk = await asyncio.wait_for(self.pacing_queue.get(), timeout=0.05)
-                    if chunk:
-                        self._pcm24_buffer.extend(chunk)
-                except asyncio.TimeoutError:
-                    pass
+                # Try to drain any available chunks quickly into the 24k buffer
+                drained = 0
+                while drained < 8:  # limit per tick to avoid starvation
+                    try:
+                        chunk = self.pacing_queue.get_nowait()
+                        if chunk:
+                            self._pcm24_buffer.extend(chunk)
+                            drained += 1
+                    except asyncio.QueueEmpty:
+                        break
 
-                # Produce at most one frame per 20ms tick
-                produced = self._pump_one_20ms_frame()
+                # Produce frames to maintain a small PCM buffer ahead
+                desired_frames = min(15, max(self.pcm_source.min_buffer_size, self.target_buffer_ms // 20 or 5))
+                produced = False
+                produced_this_tick = 0
+                while self.pcm_source.queue_size < desired_frames and produced_this_tick < 3:
+                    if not self._pump_one_20ms_frame():
+                        break
+                    produced = True
+                    produced_this_tick += 1
 
                 # Exit or finish if nothing left to do
                 if not produced and self.pacing_queue.qsize() == 0 and len(self._pcm24_buffer) == 0:
