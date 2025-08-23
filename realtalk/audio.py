@@ -251,10 +251,9 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.error(f"Error adding audio to queue: {e}")
 
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
-        """Convert 24kHz mono PCM16 to 48kHz stereo using the original working method.
+        """Convert OpenAI PCM16 to 48kHz stereo.
         
-        Reverted to original linear interpolation approach that was working.
-        The sample duplication was causing double-speed playback issues.
+        DEBUG: Testing different sample rate assumptions to fix fast audio.
         """
         try:
             if not audio_data:
@@ -264,9 +263,24 @@ class PCMQueueAudioSource(discord.AudioSource):
             mono = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
             if mono.size == 0:
                 return b""
+            
+            # DEBUG: Log sample information to diagnose the speed issue
+            samples = mono.size
+            duration_at_24k = (samples / 24000.0) * 1000  # Duration if this is 24kHz
+            log.debug(f"Audio chunk: {len(audio_data)} bytes, {samples} samples, "
+                     f"{duration_at_24k:.1f}ms @ 24kHz")
 
-            # Revert to original linear interpolation 2x upsampling
-            # This was working before - the issue wasn't the sample rate conversion
+            # TEST: Disable upsampling to test if that's causing the speed issue
+            # This will treat 24kHz as if it's already 48kHz (will be slow but might reveal the issue)
+            if True:  # Force no upsampling test
+                # Direct mono to stereo conversion (no frequency change)
+                stereo = np.column_stack((mono, mono)).reshape(-1)
+                np.clip(stereo, -32768, 32767, out=stereo)
+                result = stereo.astype(np.int16).tobytes()
+                log.debug(f"No upsampling: {len(result)} bytes output")
+                return result
+
+            # Original 24kHz -> 48kHz linear interpolation 2x upsampling
             up_len = mono.size * 2
             up = np.empty(up_len, dtype=np.float32)
             up[0::2] = mono
@@ -279,7 +293,9 @@ class PCMQueueAudioSource(discord.AudioSource):
 
             # Cast back to int16 with clipping
             np.clip(stereo, -32768, 32767, out=stereo)
-            return stereo.astype(np.int16).tobytes()
+            result = stereo.astype(np.int16).tobytes()
+            log.debug(f"With 2x upsampling: {len(result)} bytes output")
+            return result
             
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
