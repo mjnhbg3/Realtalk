@@ -918,6 +918,11 @@ class RealTalk(red_commands.Cog):
                     setattr(realtime_client, "_response_active", True)
                 except Exception:
                     pass
+                # Disable capture-side fallback logic explicitly
+                try:
+                    voice_capture.set_fallback_enabled(False)
+                except Exception:
+                    pass
                 # We will use Whisper for wake detection at speech stop
                 realtime_client.on_input_transcript = None
             

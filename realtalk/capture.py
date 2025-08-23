@@ -173,6 +173,8 @@ class VoiceCapture:
         # Fallback VAD/commit state
         self._sent_since_commit = False
         self._last_sent_ts: float = 0.0
+        # Allow/disallow client-side fallback commit+response
+        self.fallback_enabled: bool = True
 
         # Recent audio ring buffer for wake-word transcription (48kHz mono PCM16)
         self._recent_mono_48k: bytearray = bytearray()
@@ -273,30 +275,29 @@ class VoiceCapture:
                 await self._send_mixed_audio()
 
                 # CLIENT-SIDE FALLBACK: if server VAD doesn't emit, commit and request response
-                try:
-                    last_any = 0.0
-                    if self.last_audio_time:
-                        try:
-                            last_any = max(self.last_audio_time.values())
-                        except Exception:
-                            last_any = 0.0
+                if self.fallback_enabled:
+                    try:
+                        last_any = 0.0
+                        if self.last_audio_time:
+                            try:
+                                last_any = max(self.last_audio_time.values())
+                            except Exception:
+                                last_any = 0.0
 
-                    # More aggressive fallback - reduced silence threshold and added logging
-                    silence_threshold_ms = max(1500, self.silence_threshold)  # Use at least 1500ms (increased)
-                    # Only trigger fallback if not already generating a response
-                    response_active = getattr(self.realtime_client, '_response_active', False)
-                    if (self._sent_since_commit and last_any and 
-                        (current_time - last_any) >= (silence_threshold_ms / 1000.0) and 
-                        not response_active):
-                        log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence (response_active={response_active})")
-                        await self.realtime_client.commit_audio_buffer()
-                        await self.realtime_client.create_response()
-                        self._sent_since_commit = False
-                        log.info("🔄 Manual response generation requested")
-                    elif response_active:
-                        log.debug(f"Skipping fallback - response already active (silence: {current_time - last_any:.1f}s)")
-                except Exception as e:
-                    log.error(f"Error in client-side fallback: {e}")
+                        silence_threshold_ms = max(1500, self.silence_threshold)
+                        response_active = getattr(self.realtime_client, '_response_active', False)
+                        if (self._sent_since_commit and last_any and 
+                            (current_time - last_any) >= (silence_threshold_ms / 1000.0) and 
+                            not response_active):
+                            log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence (response_active={response_active})")
+                            await self.realtime_client.commit_audio_buffer()
+                            await self.realtime_client.create_response()
+                            self._sent_since_commit = False
+                            log.info("🔄 Manual response generation requested")
+                        elif response_active:
+                            log.debug(f"Skipping fallback - response already active (silence: {current_time - last_any:.1f}s)")
+                    except Exception as e:
+                        log.error(f"Error in client-side fallback: {e}")
 
                 # Performance monitoring
                 self._update_performance_stats(current_time)
@@ -714,6 +715,11 @@ class VoiceCapture:
         """Set audio activity threshold."""
         self.audio_threshold = max(0.001, min(1.0, threshold))
         log.info("Audio threshold set to %s", self.audio_threshold)
+
+    def set_fallback_enabled(self, enabled: bool):
+        """Enable/disable client-side fallback commit/response logic."""
+        self.fallback_enabled = bool(enabled)
+        log.info("Client-side fallback %s", "enabled" if self.fallback_enabled else "disabled")
 
     def set_speaker_mixing(self, mix_multiple: bool):
         """Enable or disable multiple speaker mixing."""
