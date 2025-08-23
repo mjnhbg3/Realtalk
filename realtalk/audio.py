@@ -267,17 +267,21 @@ class PCMQueueAudioSource(discord.AudioSource):
             # DEBUG: Log sample information to diagnose the speed issue
             samples = mono.size
             duration_at_24k = (samples / 24000.0) * 1000  # Duration if this is 24kHz
-            log.debug(f"Audio chunk: {len(audio_data)} bytes, {samples} samples, "
+            log.info(f"🎵 Audio chunk: {len(audio_data)} bytes, {samples} samples, "
                      f"{duration_at_24k:.1f}ms @ 24kHz")
 
-            # TEST: Disable upsampling to test if that's causing the speed issue
-            # This will treat 24kHz as if it's already 48kHz (will be slow but might reveal the issue)
-            if True:  # Force no upsampling test
-                # Direct mono to stereo conversion (no frequency change)
-                stereo = np.column_stack((mono, mono)).reshape(-1)
+            # TEST: Try simple 2x sample duplication instead of linear interpolation
+            # Each 24kHz sample becomes two 48kHz samples (duplicate each sample)
+            if True:  # Test simple duplication upsampling
+                # First upsample 24kHz -> 48kHz by duplicating each sample
+                upsampled = np.repeat(mono, 2)
+                log.info(f"🎵 Upsampled from {mono.size} to {upsampled.size} samples (2x duplication)")
+                
+                # Then convert mono to stereo
+                stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
                 np.clip(stereo, -32768, 32767, out=stereo)
                 result = stereo.astype(np.int16).tobytes()
-                log.debug(f"No upsampling: {len(result)} bytes output")
+                log.info(f"🎵 Sample duplication: input {len(audio_data)} bytes -> output {len(result)} bytes")
                 return result
 
             # Original 24kHz -> 48kHz linear interpolation 2x upsampling
