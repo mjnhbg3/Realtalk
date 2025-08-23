@@ -59,7 +59,7 @@ class RealTalk(red_commands.Cog):
             "mix_multiple": True,
             "idle_timeout": 60,
             # Audio rate control settings to prevent Discord timing compensation
-            "audio_rate_limiting": True,  # Enable rate-limited audio delivery
+            "audio_rate_limiting": False,  # DISABLED FOR TESTING - Enable rate-limited audio delivery
             "audio_buffer_target_ms": 200,  # Target buffer size for pacing (ms)
         }
         

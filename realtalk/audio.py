@@ -445,7 +445,7 @@ class RateLimitedAudioSource(discord.AudioSource):
                  target_sample_rate: int = 48000, 
                  channels: int = 2, 
                  frame_size: int = 960,
-                 rate_limit_enabled: bool = True,
+                 rate_limit_enabled: bool = False,  # DISABLED FOR TESTING
                  target_buffer_ms: int = 200):
         super().__init__()
         
