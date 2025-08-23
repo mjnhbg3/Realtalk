@@ -896,7 +896,13 @@ class RealTalk(red_commands.Cog):
                         log.debug(f"Created fresh rate-limited audio source (rate_limit={audio_rate_limiting}, "
                                 f"buffer_target={audio_buffer_target_ms}ms)")
 
-                        # Don't start pacing until Discord playback begins to prevent buffer issues
+                        # Start pacing immediately for rate limiting to work properly
+                        try:
+                            if hasattr(current_audio_source, 'start_pacing') and audio_rate_limiting:
+                                current_audio_source.start_pacing()
+                                log.debug("Started audio pacing for rate limiting")
+                        except Exception as e:
+                            log.error(f"Error starting pacing: {e}")
                     
                     # Queue audio data (will be paced if rate limiting enabled)
                     current_audio_source.put_audio(audio_data)
@@ -913,10 +919,7 @@ class RealTalk(red_commands.Cog):
                         # Start Discord playback
                         voice_client.play(current_audio_source, after=_audio_finished)
                         
-                        # Start rate control pacing if enabled
-                        if hasattr(current_audio_source, 'start_pacing'):
-                            current_audio_source.start_pacing()
-                        
+                        # Pacing already started when audio source was created
                         total_buffer = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Started Discord audio playback with {total_buffer} frames buffered "
                                 f"(rate_limiting={current_audio_source.rate_limit_enabled})")

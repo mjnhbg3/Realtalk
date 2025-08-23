@@ -528,7 +528,7 @@ class RateLimitedAudioSource(discord.AudioSource):
                     self.rate_control_stats['frames_paced'] += 1
                     
                     # Log progress occasionally
-                    if self.frames_delivered % 250 == 0:  # Every 5 seconds
+                    if self.frames_delivered % 50 == 0:  # Every 1 second  
                         queue_size = self.pacing_queue.qsize()
                         log.debug(f"Rate control: {self.frames_delivered} frames paced, "
                                 f"{queue_size} frames queued ({queue_size * 20}ms)")
@@ -611,7 +611,7 @@ class RateLimitedAudioSource(discord.AudioSource):
                 self.playback_start_time = time.time()
             self.frames_delivered = 0
             self.pacing_task = asyncio.create_task(self._audio_pacing_loop())
-            log.debug("Started clock-based audio pacing")
+            log.info("Started clock-based audio pacing for rate limiting")
     
     def stop_pacing(self):
         """Stop rate-limited audio delivery."""

@@ -277,17 +277,19 @@ class VoiceCapture:
                             last_any = 0.0
 
                     # More aggressive fallback - reduced silence threshold and added logging
-                    silence_threshold_ms = max(800, self.silence_threshold)  # Use at least 800ms
+                    silence_threshold_ms = max(1500, self.silence_threshold)  # Use at least 1500ms (increased)
                     # Only trigger fallback if not already generating a response
                     response_active = getattr(self.realtime_client, '_response_active', False)
                     if (self._sent_since_commit and last_any and 
                         (current_time - last_any) >= (silence_threshold_ms / 1000.0) and 
                         not response_active):
-                        log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence")
+                        log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence (response_active={response_active})")
                         await self.realtime_client.commit_audio_buffer()
                         await self.realtime_client.create_response()
                         self._sent_since_commit = False
                         log.info("🔄 Manual response generation requested")
+                    elif response_active:
+                        log.debug(f"Skipping fallback - response already active (silence: {current_time - last_any:.1f}s)")
                 except Exception as e:
                     log.error(f"Error in client-side fallback: {e}")
 
