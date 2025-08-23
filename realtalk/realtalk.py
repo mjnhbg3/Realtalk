@@ -921,6 +921,8 @@ class RealTalk(red_commands.Cog):
                 # Disable capture-side fallback logic explicitly
                 try:
                     voice_capture.set_fallback_enabled(False)
+                    # Set a small activity threshold for speech detection (tunable)
+                    voice_capture.set_activity_threshold(0.008)
                 except Exception:
                     pass
                 # We will use Whisper for wake detection at speech stop
@@ -1163,11 +1165,7 @@ class RealTalk(red_commands.Cog):
             last_any = 0.0
             while guild_id in self.sessions:
                 # Determine latest activity time
-                try:
-                    if voice_capture.last_audio_time:
-                        last_any = max(voice_capture.last_audio_time.values())
-                except Exception:
-                    pass
+                last_any = getattr(voice_capture, 'last_voice_activity_ts', 0.0) or 0.0
                 now = time.time()
                 # Consider speaking if we've seen audio in the last 200ms
                 recently_active = (now - last_any) < 0.2

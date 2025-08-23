@@ -173,6 +173,10 @@ class VoiceCapture:
         # Fallback VAD/commit state
         self._sent_since_commit = False
         self._last_sent_ts: float = 0.0
+        
+        # Voice activity tracking for wake gating (RMS-based)
+        self.last_voice_activity_ts: float = 0.0
+        self.activity_threshold: float = 0.005  # normalized RMS
         # Allow/disallow client-side fallback commit+response
         self.fallback_enabled: bool = True
 
@@ -466,6 +470,15 @@ class VoiceCapture:
                 # Mix multiple streams by averaging
                 mixed_audio = self._simple_mix_audio_streams(audio_to_send)
                 if mixed_audio:
+                    # Update voice activity timestamp based on RMS energy
+                    try:
+                        arr = np.frombuffer(mixed_audio, dtype=np.int16).astype(np.float64)
+                        if arr.size:
+                            rms = np.sqrt(np.mean(arr * arr)) / 32768.0
+                            if rms > self.activity_threshold:
+                                self.last_voice_activity_ts = time.time()
+                    except Exception:
+                        pass
                     # Keep recent buffer for wake-word detection (store 48k mono PCM16)
                     try:
                         self._append_recent_audio(mixed_audio)
@@ -720,6 +733,11 @@ class VoiceCapture:
         """Enable/disable client-side fallback commit/response logic."""
         self.fallback_enabled = bool(enabled)
         log.info("Client-side fallback %s", "enabled" if self.fallback_enabled else "disabled")
+
+    def set_activity_threshold(self, threshold: float):
+        """Set RMS activity threshold for wake gating (0..1)."""
+        self.activity_threshold = max(0.0005, min(0.5, float(threshold)))
+        log.info("Wake activity threshold set to %s", self.activity_threshold)
 
     def set_speaker_mixing(self, mix_multiple: bool):
         """Enable or disable multiple speaker mixing."""

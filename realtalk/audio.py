@@ -298,13 +298,10 @@ class PCMQueueAudioSource(discord.AudioSource):
             else:
                 up[1] = src[0]
 
-            # Interleave to stereo L,R,L,R as int16
-            stereo_i16 = np.empty(output_samples * 2, dtype=np.int16)
-            # Clip to int16 range before casting
+            # Duplicate to stereo and interleave robustly
             up_clipped = np.clip(up, -32768, 32767).astype(np.int16)
-            stereo_i16[0::2] = up_clipped  # Left
-            stereo_i16[1::2] = up_clipped  # Right (duplicate)
-            result = stereo_i16.tobytes()
+            stereo = np.repeat(up_clipped[:, None], 2, axis=1).reshape(-1)
+            result = stereo.tobytes()
             
             # Verify the math
             # Optional duration check for debugging (downgraded to debug to reduce spam)
