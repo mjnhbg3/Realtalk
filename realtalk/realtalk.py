@@ -875,7 +875,9 @@ class RealTalk(red_commands.Cog):
                     log.debug("Audio stream completed successfully")
                 # Clear the current source so new audio can start fresh playback
                 current_audio_source = None
-                self.sessions[guild_id]["current_audio_source"] = None
+                # Check if session still exists before accessing it
+                if guild_id in self.sessions:
+                    self.sessions[guild_id]["current_audio_source"] = None
             
             # Set up audio output callback: enqueue and start playback with proper timing
             def _handle_audio_output(audio_data: bytes):
@@ -894,12 +896,7 @@ class RealTalk(red_commands.Cog):
                         log.debug(f"Created fresh rate-limited audio source (rate_limit={audio_rate_limiting}, "
                                 f"buffer_target={audio_buffer_target_ms}ms)")
 
-                        # PRIME: start pacing immediately so PCM buffer fills before playback
-                        try:
-                            if hasattr(current_audio_source, 'start_pacing'):
-                                current_audio_source.start_pacing()
-                        except Exception:
-                            pass
+                        # Don't start pacing until Discord playback begins to prevent buffer issues
                     
                     # Queue audio data (will be paced if rate limiting enabled)
                     current_audio_source.put_audio(audio_data)
@@ -958,20 +955,17 @@ class RealTalk(red_commands.Cog):
                     pass
             
             def _on_resp_done():
-                # Response completed - but don't immediately finish stream to prevent timing compensation
+                # Response completed - mark stream as finished so it can end properly
                 try:
                     nonlocal current_audio_source
                     if current_audio_source:
-                        # Don't immediately finish stream - let it play out naturally
-                        # Only finish if queue is very low to prevent premature ending
+                        # Always finish the stream when OpenAI says response is done
+                        # This ensures Discord stops showing the bot as speaking
+                        current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
-                        if total_queue <= 2:  # Less than 40ms remaining
-                            current_audio_source.finish_stream()
-                            log.debug("Response completed with low queue - marked stream for completion")
-                        else:
-                            log.debug(f"Response completed but {total_queue} frames remain - letting play out")
-                except Exception:
-                    pass
+                        log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
+                except Exception as e:
+                    log.error(f"Error finishing stream: {e}")
             
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
             realtime_client.on_input_audio_buffer_speech_stopped = _on_speech_stopped

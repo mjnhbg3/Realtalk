@@ -278,7 +278,11 @@ class VoiceCapture:
 
                     # More aggressive fallback - reduced silence threshold and added logging
                     silence_threshold_ms = max(800, self.silence_threshold)  # Use at least 800ms
-                    if self._sent_since_commit and last_any and (current_time - last_any) >= (silence_threshold_ms / 1000.0):
+                    # Only trigger fallback if not already generating a response
+                    response_active = getattr(self.realtime_client, '_response_active', False)
+                    if (self._sent_since_commit and last_any and 
+                        (current_time - last_any) >= (silence_threshold_ms / 1000.0) and 
+                        not response_active):
                         log.info(f"🔄 Client-side fallback triggered after {silence_threshold_ms}ms silence")
                         await self.realtime_client.commit_audio_buffer()
                         await self.realtime_client.create_response()

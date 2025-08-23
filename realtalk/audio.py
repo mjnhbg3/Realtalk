@@ -161,15 +161,14 @@ class PCMQueueAudioSource(discord.AudioSource):
                         
                     return audio_data
                 else:
-                    # CRITICAL: Never return empty bytes unless truly finished
-                    # This prevents Discord's timing compensation from triggering
+                    # CRITICAL: End stream properly when finished to prevent Discord showing bot as speaking forever
                     
-                    # Only end stream if we never received any real audio AND explicitly finished
-                    if self.stream_finished and not self.has_real_audio:
-                        return b''  # Safe to end - never had audio
+                    # End stream if explicitly finished, regardless of whether we had real audio
+                    if self.stream_finished:
+                        log.debug("Stream finished - ending audio playback")
+                        return b''  # End the stream
                     
-                    # For all other cases, maintain continuous silence stream
-                    # This prevents Discord from detecting timing irregularities
+                    # For ongoing streams, maintain continuous silence to prevent timing compensation
                     self.underrun_count += 1
                     if self.underrun_count % 100 == 1:  # Log less frequently
                         log.debug(f"Audio underrun #{self.underrun_count} - maintaining timing with silence")
