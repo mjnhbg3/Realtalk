@@ -92,10 +92,9 @@ class PCMQueueAudioSource(discord.AudioSource):
     ):
         super().__init__()
         
-        # TEST: Try 24kHz to match OpenAI exactly - no upsampling needed
-        self.sample_rate = 24000  # Force 24kHz instead of 48kHz
+        self.sample_rate = sample_rate  # Back to 48kHz for Discord
         self.channels = channels
-        self.frame_size = 480  # 20ms at 24kHz = 480 samples
+        self.frame_size = frame_size  # Back to 960 samples (20ms at 48kHz)
         self.max_queue_size = max_queue_size
         self.volume = volume
         
@@ -271,15 +270,41 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.info(f"🎵 Audio chunk: {len(audio_data)} bytes, {samples} samples, "
                      f"{duration_at_24k:.1f}ms @ 24kHz")
 
-            # TEST: No sample rate conversion - just mono to stereo at 24kHz
-            # Let Discord handle the audio at its native 24kHz rate
-            if True:  # Test no upsampling at all
-                # Direct mono to stereo conversion (no frequency change)
-                stereo = np.column_stack((mono, mono)).reshape(-1)
-                np.clip(stereo, -32768, 32767, out=stereo)
-                result = stereo.astype(np.int16).tobytes()
-                log.info(f"🎵 24kHz direct: input {len(audio_data)} bytes -> output {len(result)} bytes")
-                return result
+            # CORRECT UPSAMPLING: 24kHz → 48kHz means we need 2x the samples
+            # Each input sample at 24kHz needs to become TWO output samples at 48kHz
+            # to maintain the same time duration
+            
+            # Method: Linear interpolation (better quality than duplication)
+            input_samples = mono.size
+            output_samples = input_samples * 2  # Double the samples for 2x sample rate
+            
+            # Create output array
+            upsampled = np.zeros(output_samples, dtype=np.float32)
+            
+            # Linear interpolation: each input sample maps to two output samples
+            for i in range(input_samples):
+                # Direct copy of input sample
+                upsampled[i * 2] = mono[i]
+                
+                # Interpolated sample (average with next, or repeat last)
+                if i < input_samples - 1:
+                    upsampled[i * 2 + 1] = (mono[i] + mono[i + 1]) / 2.0
+                else:
+                    upsampled[i * 2 + 1] = mono[i]  # Repeat last sample
+            
+            log.info(f"🎵 Upsampled: {input_samples} samples @ 24kHz → {output_samples} samples @ 48kHz")
+            
+            # Convert to stereo
+            stereo = np.column_stack((upsampled, upsampled)).reshape(-1)
+            np.clip(stereo, -32768, 32767, out=stereo)
+            result = stereo.astype(np.int16).tobytes()
+            
+            # Verify the math
+            input_duration_ms = (input_samples / 24000.0) * 1000
+            output_duration_ms = (output_samples / 48000.0) * 1000
+            log.info(f"🎵 Duration check: input {input_duration_ms:.1f}ms @ 24kHz = output {output_duration_ms:.1f}ms @ 48kHz")
+            
+            return result
 
             # Original 24kHz -> 48kHz linear interpolation 2x upsampling
             up_len = mono.size * 2
@@ -459,9 +484,9 @@ class RateLimitedAudioSource(discord.AudioSource):
     """
     
     def __init__(self, 
-                 target_sample_rate: int = 24000,  # TEST: Use 24kHz to match OpenAI
+                 target_sample_rate: int = 48000,  # Discord requires 48kHz
                  channels: int = 2, 
-                 frame_size: int = 480,  # 20ms at 24kHz
+                 frame_size: int = 960,  # 20ms at 48kHz
                  rate_limit_enabled: bool = False,  # DISABLED FOR TESTING
                  target_buffer_ms: int = 200):
         super().__init__()
