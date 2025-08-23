@@ -548,6 +548,9 @@ class RateLimitedAudioSource(discord.AudioSource):
         # Cached sizes
         self._pcm24_frame_bytes = 480 * 2  # 480 samples @24kHz mono, 16-bit
         self._pcm48_frame_bytes = frame_size * channels * 2  # 3840 bytes
+
+        # Finish-handling: defer actual stream end until all buffers drain
+        self._finish_when_drained = False
         
         log.info(f"RateLimitedAudioSource initialized: rate_limit={rate_limit_enabled}, "
                 f"target_buffer={target_buffer_ms}ms")
@@ -637,10 +640,20 @@ class RateLimitedAudioSource(discord.AudioSource):
                 
                 # Track actual loop timing for debugging using event loop time
                 self.last_frame_time = loop.time()
-                
+
                 # Explicit yield point to prevent event loop blocking
                 if self.frames_delivered % 10 == 0:  # Every 200ms
                     await asyncio.sleep(0)
+
+                # If a finish was requested, end only after all buffers are drained
+                if self._finish_when_drained:
+                    if (self.pacing_queue.qsize() == 0 and
+                        len(self._pcm24_buffer) == 0 and
+                        self.pcm_source.queue_size == 0):
+                        self.pcm_source.finish_stream()
+                        # Stop pacing loop gracefully
+                        self._stop_pacing = True
+                        continue
                 
             except asyncio.CancelledError:
                 log.debug("Audio pacing loop cancelled")
@@ -775,8 +788,12 @@ class RateLimitedAudioSource(discord.AudioSource):
                 # Produce at most one frame per 20ms tick
                 produced = self._pump_one_20ms_frame()
 
-                # Exit if nothing left to do
+                # Exit or finish if nothing left to do
                 if not produced and self.pacing_queue.qsize() == 0 and len(self._pcm24_buffer) == 0:
+                    # If finish was requested, end the PCM stream now that it's drained
+                    if self._finish_when_drained:
+                        if self.pcm_source.queue_size == 0:
+                            self.pcm_source.finish_stream()
                     break
 
                 # Sleep to maintain ~20ms cadence
@@ -810,9 +827,17 @@ class RateLimitedAudioSource(discord.AudioSource):
         self.accumulated_audio_time = 0.0
     
     def finish_stream(self):
-        """Signal that the audio stream is complete."""
-        self.pcm_source.finish_stream()
-        # Don't stop pacing immediately - let remaining audio play out
+        """Signal that the audio stream is complete.
+
+        We defer actual PCM finish until pacing and PCM buffers are fully drained
+        to prevent premature cutoff between ticks.
+        """
+        # Mark for deferred finish
+        self._finish_when_drained = True
+        # If there's nothing buffered anywhere, finish immediately
+        if (self.pacing_queue.qsize() == 0 and len(self._pcm24_buffer) == 0 and
+            self.pcm_source.queue_size == 0):
+            self.pcm_source.finish_stream()
     
     def interrupt_playback(self):
         """Immediately interrupt playback for user interruptions."""
