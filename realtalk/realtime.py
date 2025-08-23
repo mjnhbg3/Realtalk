@@ -48,6 +48,8 @@ class RealtimeClient:
         self.on_response_audio_transcript_done: Optional[Callable[[str], None]] = None
         self.on_input_audio_buffer_speech_started: Optional[Callable[[], None]] = None
         self.on_input_audio_buffer_speech_stopped: Optional[Callable[[], None]] = None
+        # Optional callback for input transcripts (wake-word, etc.)
+        self.on_input_transcript: Optional[Callable[[str], None]] = None
         self.on_error: Optional[Callable[[Dict[str, Any]], None]] = None
         self.on_response_started: Optional[Callable[[], None]] = None
         self.on_response_done: Optional[Callable[[], None]] = None
@@ -342,6 +344,8 @@ class RealtimeClient:
                 
             elif event_type == "response.created":
                 log.info("✅ OpenAI response generation started")
+                # Mark response as active even when server auto-creates it
+                self._response_active = True
                 if self.on_response_started:
                     try:
                         self.on_response_started()
@@ -371,6 +375,26 @@ class RealtimeClient:
                 log.debug("Conversation item created")
                 if self.on_conversation_item_created:
                     self.on_conversation_item_created(event)
+                # Try to surface any input transcripts for wake-word handling
+                try:
+                    item = event.get("item") or {}
+                    role = item.get("role")
+                    contents = item.get("content") or []
+                    if role == "user" and contents:
+                        # Look for transcript or text content
+                        text_parts = []
+                        for c in contents:
+                            if isinstance(c, dict):
+                                if "transcript" in c and c.get("transcript"):
+                                    text_parts.append(str(c.get("transcript")))
+                                elif c.get("type") in ("input_text", "text") and c.get("text"):
+                                    text_parts.append(str(c.get("text")))
+                        if text_parts:
+                            transcript = " ".join(text_parts).strip()
+                            if transcript and self.on_input_transcript:
+                                self.on_input_transcript(transcript)
+                except Exception:
+                    pass
                     
             elif event_type == "response.audio.delta":
                 # Handle audio output
@@ -393,6 +417,12 @@ class RealtimeClient:
                 log.debug(f"Audio transcript: {transcript}")
                 if self.on_response_audio_transcript_done:
                     self.on_response_audio_transcript_done(transcript)
+            
+            elif event_type in ("input_audio_transcription.completed", "input_audio_transcription.done"):
+                # Some versions emit a dedicated event for input transcripts
+                transcript = (event.get("transcript") or "").strip()
+                if transcript and self.on_input_transcript:
+                    self.on_input_transcript(transcript)
                     
             elif event_type == "response.audio.done":
                 log.debug("Response audio stream completed")
@@ -454,18 +484,30 @@ class RealtimeClient:
 
     def update_vad_settings(self, threshold: float = 0.5, silence_duration_ms: int = 300):
         """Update Voice Activity Detection settings."""
-        self.session_config["turn_detection"] = {
+        td = {
             "type": "server_vad",
             "threshold": threshold,
             "prefix_padding_ms": 300,
             "silence_duration_ms": silence_duration_ms,
-            "create_response": True
+            "create_response": self.session_config.get("turn_detection", {}).get("create_response", True)
         }
+        self.session_config["turn_detection"] = td
         
         if self.session_active:
             asyncio.create_task(self._send_message({
                 "type": "session.update",
                 "session": {"turn_detection": self.session_config["turn_detection"]}
+            }))
+
+    def set_auto_create_response(self, enabled: bool):
+        """Toggle server VAD auto-create-response behavior."""
+        td = self.session_config.get("turn_detection", {})
+        td["create_response"] = bool(enabled)
+        self.session_config["turn_detection"] = td
+        if self.session_active:
+            asyncio.create_task(self._send_message({
+                "type": "session.update",
+                "session": {"turn_detection": td}
             }))
 
     @property

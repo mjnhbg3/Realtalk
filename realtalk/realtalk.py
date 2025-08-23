@@ -61,6 +61,10 @@ class RealTalk(red_commands.Cog):
             # Audio rate control settings to prevent Discord timing compensation
             "audio_rate_limiting": False,  # DISABLED FOR TESTING - Enable rate-limited audio delivery
             "audio_buffer_target_ms": 200,  # Target buffer size for pacing (ms)
+            # Wake-word gate (optional)
+            "wake_word_enabled": False,
+            "wake_words": ["hey dukebot", "dukebot"],
+            "wake_window_ms": 6000,
         }
         
         default_guild = {
@@ -570,6 +574,9 @@ class RealTalk(red_commands.Cog):
         local_silence = await self.config.silence_threshold()
         rate_limiting = await self.config.audio_rate_limiting()
         buffer_target = await self.config.audio_buffer_target_ms()
+        wake_enabled = await self.config.wake_word_enabled()
+        wake_words = await self.config.wake_words()
+        wake_window = await self.config.wake_window_ms()
 
         lines = [
             "**RealTalk Settings**",
@@ -583,6 +590,8 @@ class RealTalk(red_commands.Cog):
             f"Local silence hangover: `{local_silence}` ms",
             f"Idle timeout: `{idle}` seconds",
             f"Audio rate limiting: `{rate_limiting}` (buffer: {buffer_target}ms)",
+            f"Wake-word: `{wake_enabled}` (window: {wake_window}ms)",
+            f"Wake phrases: {', '.join(wake_words) if wake_words else '(none)'}",
             "",
             "System prompt:",
             box(prompt or "(empty)")
@@ -651,6 +660,22 @@ class RealTalk(red_commands.Cog):
             return
         await self.config.idle_timeout.set(seconds)
         await ctx.send(f"Idle timeout set to {seconds}s. Rejoin voice to apply.")
+
+    @set_group.command(name="wake")
+    async def set_wake(self, ctx: red_commands.Context, enabled: bool):
+        """Enable or disable wake-word gating (true/false)."""
+        await self.config.wake_word_enabled.set(bool(enabled))
+        await ctx.send(f"Wake-word gating {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
+
+    @set_group.command(name="wakewords")
+    async def set_wakewords(self, ctx: red_commands.Context, *, phrases: str):
+        """Set wake words, comma-separated (e.g., 'hey dukebot, dukebot')."""
+        words = [w.strip().lower() for w in phrases.split(',') if w.strip()]
+        if not words:
+            await ctx.send("Please provide at least one wake phrase.")
+            return
+        await self.config.wake_words.set(words)
+        await ctx.send(f"Wake words set to: {', '.join(words)}. Rejoin voice to apply.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
@@ -865,6 +890,32 @@ class RealTalk(red_commands.Cog):
             
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
+
+            # Wake-word gating (optional)
+            wake_enabled = await self.config.wake_word_enabled()
+            wake_words = [w.lower() for w in (await self.config.wake_words())]
+            wake_window_ms = await self.config.wake_window_ms()
+            wake_state = {"detected": False, "ts": 0.0}
+            if wake_enabled:
+                # Suppress auto responses at the server
+                try:
+                    realtime_client.set_auto_create_response(False)
+                except Exception:
+                    pass
+                # Suppress client-side fallback by faking active response state
+                try:
+                    setattr(realtime_client, "_response_active", True)
+                except Exception:
+                    pass
+                # Listen for input transcripts to detect wake phrases
+                def _on_input_transcript(text: str):
+                    t = (text or "").lower()
+                    for w in wake_words:
+                        if w and w in t:
+                            wake_state["detected"] = True
+                            wake_state["ts"] = time.time()
+                            break
+                realtime_client.on_input_transcript = _on_input_transcript
             
             # Audio playback completion callback
             def _audio_finished(error):
@@ -944,7 +995,22 @@ class RealTalk(red_commands.Cog):
             
             def _on_speech_stopped():
                 # Speech ended - ready for bot response
-                pass
+                try:
+                    if wake_enabled:
+                        now = time.time()
+                        if wake_state["detected"] and (now - wake_state["ts"]) <= (wake_window_ms / 1000.0):
+                            # Temporarily allow creating a response
+                            try:
+                                setattr(realtime_client, "_response_active", False)
+                            except Exception:
+                                pass
+                            # Commit and create a response for this utterance
+                            asyncio.create_task(realtime_client.commit_audio_buffer())
+                            asyncio.create_task(realtime_client.create_response())
+                        # Reset detection per utterance
+                        wake_state["detected"] = False
+                except Exception:
+                    pass
             
             # Reset playback state on response boundaries
             def _on_resp_start():
@@ -967,6 +1033,12 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
+                    # When wake gating is enabled, suppress fallback by keeping response_active=True when idle
+                    if wake_enabled:
+                        try:
+                            setattr(realtime_client, "_response_active", True)
+                        except Exception:
+                            pass
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
             
