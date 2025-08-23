@@ -174,6 +174,11 @@ class VoiceCapture:
         self._sent_since_commit = False
         self._last_sent_ts: float = 0.0
 
+        # Recent audio ring buffer for wake-word transcription (48kHz mono PCM16)
+        self._recent_mono_48k: bytearray = bytearray()
+        self._recent_capacity_seconds: int = 8  # keep last 8 seconds
+        self._recent_capacity_bytes: int = 48000 * 2 * self._recent_capacity_seconds
+
     async def start(self):
         """Start voice capture with enhanced error handling."""
         try:
@@ -460,6 +465,11 @@ class VoiceCapture:
                 # Mix multiple streams by averaging
                 mixed_audio = self._simple_mix_audio_streams(audio_to_send)
                 if mixed_audio:
+                    # Keep recent buffer for wake-word detection (store 48k mono PCM16)
+                    try:
+                        self._append_recent_audio(mixed_audio)
+                    except Exception:
+                        pass
                     # Downsample 48k -> 24k mono for OpenAI
                     mixed_24k = self._downsample_48k_to_24k_mono(mixed_audio)
                     if mixed_24k:
@@ -471,6 +481,51 @@ class VoiceCapture:
 
         except Exception as e:
             log.error(f"Error sending audio: {e}")
+
+    # Recent audio helpers for wake-word detection
+    def _append_recent_audio(self, audio_48k_mono_pcm16: bytes):
+        if not audio_48k_mono_pcm16:
+            return
+        buf = self._recent_mono_48k
+        buf.extend(audio_48k_mono_pcm16)
+        # Trim to capacity from the left
+        if len(buf) > self._recent_capacity_bytes:
+            # Keep only last N bytes
+            del buf[: len(buf) - self._recent_capacity_bytes]
+
+    def get_recent_audio_pcm48k(self, seconds: float = 5.0) -> bytes:
+        """Return last N seconds of 48kHz mono PCM16 audio."""
+        if seconds <= 0:
+            return b""
+        needed = int(48000 * 2 * seconds)
+        if needed <= 0:
+            return b""
+        data = bytes(self._recent_mono_48k[-needed:]) if self._recent_mono_48k else b""
+        return data
+
+    def get_recent_audio_wav(self, seconds: float = 5.0, sample_rate: int = 48000) -> bytes:
+        """Return a minimal WAV (PCM16 mono) containing last N seconds of audio."""
+        pcm = self.get_recent_audio_pcm48k(seconds)
+        if not pcm:
+            return b""
+        return self._pcm16_mono_to_wav(pcm, sample_rate)
+
+    @staticmethod
+    def _pcm16_mono_to_wav(pcm_bytes: bytes, sample_rate: int = 48000) -> bytes:
+        """Wrap raw PCM16 mono data in a simple WAV header."""
+        import struct
+        num_channels = 1
+        bits_per_sample = 16
+        byte_rate = sample_rate * num_channels * (bits_per_sample // 8)
+        block_align = num_channels * (bits_per_sample // 8)
+        data_size = len(pcm_bytes)
+        riff_chunk_size = 36 + data_size
+        header = b"RIFF" + struct.pack('<I', riff_chunk_size) + b"WAVE"
+        # fmt subchunk
+        header += b"fmt " + struct.pack('<IHHIIHH', 16, 1, num_channels, sample_rate, byte_rate, block_align, bits_per_sample)
+        # data subchunk
+        header += b"data" + struct.pack('<I', data_size)
+        return header + pcm_bytes
 
     def _simple_process_audio_chunks(self, chunks: List[bytes], user_id: int) -> Optional[bytes]:
         """Simple audio processing - just format conversion, no filtering."""

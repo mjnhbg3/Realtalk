@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from typing import Optional, Dict, Any
+import aiohttp
 
 import discord
 from discord.ext import commands
@@ -65,6 +66,9 @@ class RealTalk(red_commands.Cog):
             "wake_word_enabled": False,
             "wake_words": ["hey dukebot", "dukebot"],
             "wake_window_ms": 6000,
+            "wake_recent_seconds": 5,
+            "wake_whisper_model": "whisper-1",
+            "wake_language": "en",
         }
         
         default_guild = {
@@ -577,6 +581,9 @@ class RealTalk(red_commands.Cog):
         wake_enabled = await self.config.wake_word_enabled()
         wake_words = await self.config.wake_words()
         wake_window = await self.config.wake_window_ms()
+        wake_recent = await self.config.wake_recent_seconds()
+        wake_model = await self.config.wake_whisper_model()
+        wake_lang = await self.config.wake_language()
 
         lines = [
             "**RealTalk Settings**",
@@ -592,6 +599,7 @@ class RealTalk(red_commands.Cog):
             f"Audio rate limiting: `{rate_limiting}` (buffer: {buffer_target}ms)",
             f"Wake-word: `{wake_enabled}` (window: {wake_window}ms)",
             f"Wake phrases: {', '.join(wake_words) if wake_words else '(none)'}",
+            f"Wake recent window: {wake_recent}s, model: {wake_model}, lang: {wake_lang}",
             "",
             "System prompt:",
             box(prompt or "(empty)")
@@ -895,6 +903,9 @@ class RealTalk(red_commands.Cog):
             wake_enabled = await self.config.wake_word_enabled()
             wake_words = [w.lower() for w in (await self.config.wake_words())]
             wake_window_ms = await self.config.wake_window_ms()
+            wake_recent_secs = await self.config.wake_recent_seconds()
+            wake_model = await self.config.wake_whisper_model()
+            wake_lang = await self.config.wake_language()
             wake_state = {"detected": False, "ts": 0.0}
             if wake_enabled:
                 # Suppress auto responses at the server
@@ -907,15 +918,8 @@ class RealTalk(red_commands.Cog):
                     setattr(realtime_client, "_response_active", True)
                 except Exception:
                     pass
-                # Listen for input transcripts to detect wake phrases
-                def _on_input_transcript(text: str):
-                    t = (text or "").lower()
-                    for w in wake_words:
-                        if w and w in t:
-                            wake_state["detected"] = True
-                            wake_state["ts"] = time.time()
-                            break
-                realtime_client.on_input_transcript = _on_input_transcript
+                # We will use Whisper for wake detection at speech stop
+                realtime_client.on_input_transcript = None
             
             # Audio playback completion callback
             def _audio_finished(error):
@@ -997,18 +1001,34 @@ class RealTalk(red_commands.Cog):
                 # Speech ended - ready for bot response
                 try:
                     if wake_enabled:
-                        now = time.time()
-                        if wake_state["detected"] and (now - wake_state["ts"]) <= (wake_window_ms / 1000.0):
-                            # Temporarily allow creating a response
+                        # Run wake-word check via Whisper on recent buffered audio
+                        async def _wake_and_trigger():
                             try:
-                                setattr(realtime_client, "_response_active", False)
-                            except Exception:
-                                pass
-                            # Commit and create a response for this utterance
-                            asyncio.create_task(realtime_client.commit_audio_buffer())
-                            asyncio.create_task(realtime_client.create_response())
-                        # Reset detection per utterance
-                        wake_state["detected"] = False
+                                # Grab recent audio from capture as WAV
+                                wav = voice_capture.get_recent_audio_wav(seconds=wake_recent_secs, sample_rate=48000)
+                                if not wav:
+                                    return
+                                transcript = await self._whisper_transcribe(await self._get_openai_api_key(), wav, model=wake_model, language=wake_lang)
+                                t = (transcript or "").lower()
+                                match = any(w in t for w in wake_words if w)
+                                if match:
+                                    # Temporarily allow creating a response
+                                    try:
+                                        setattr(realtime_client, "_response_active", False)
+                                    except Exception:
+                                        pass
+                                    # Commit and create a response for this utterance
+                                    await realtime_client.commit_audio_buffer()
+                                    await realtime_client.create_response()
+                                else:
+                                    # Keep fallback suppressed by staying in active state
+                                    try:
+                                        setattr(realtime_client, "_response_active", True)
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                log.error(f"Wake-word whisper check failed: {e}")
+                        asyncio.create_task(_wake_and_trigger())
                 except Exception:
                     pass
             
@@ -1063,6 +1083,32 @@ class RealTalk(red_commands.Cog):
             log.error(f"Failed to start session: {e}")
             await self._cleanup_session(guild_id)
             await ctx.send(f"Failed to start AI session: {e}")
+
+    async def _whisper_transcribe(self, api_key: Optional[str], wav_bytes: bytes, model: str = "whisper-1", language: str = "en") -> Optional[str]:
+        """Call OpenAI Whisper transcription API for wake-word detection."""
+        if not api_key or not wav_bytes:
+            return None
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+        }
+        data = aiohttp.FormData()
+        data.add_field("file", wav_bytes, filename="wake.wav", content_type="audio/wav")
+        data.add_field("model", model)
+        if language:
+            data.add_field("language", language)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status != 200:
+                        txt = await resp.text()
+                        log.error(f"Whisper transcription failed: {resp.status} {txt}")
+                        return None
+                    payload = await resp.json()
+                    return payload.get("text")
+        except Exception as e:
+            log.error(f"Error calling Whisper API: {e}")
+            return None
 
     async def _cleanup_session(self, guild_id: int):
         """Clean up session resources."""
