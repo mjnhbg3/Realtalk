@@ -654,7 +654,40 @@ class RateLimitedAudioSource(discord.AudioSource):
         if self.rate_limit_enabled:
             self.queue_audio_for_pacing(audio_data)
         else:
-            self.pcm_source.put_audio(audio_data)
+            # Even without rate limiting, we need basic pacing for Discord
+            # Queue the audio and start a simple delivery task
+            self.queue_audio_for_pacing(audio_data)
+            if not self.pacing_task or self.pacing_task.done():
+                self.pacing_task = asyncio.create_task(self._simple_audio_delivery())
+    
+    async def _simple_audio_delivery(self):
+        """Simple audio delivery without complex rate limiting."""
+        log.debug("Starting simple audio delivery")
+        
+        while True:
+            try:
+                # Get audio from pacing queue with a short timeout
+                try:
+                    audio_chunk = await asyncio.wait_for(
+                        self.pacing_queue.get(), timeout=0.1
+                    )
+                    # Deliver immediately to PCM source
+                    self.pcm_source.put_audio(audio_chunk)
+                    
+                    # Small delay to prevent overwhelming Discord (much smaller than rate limiting)
+                    await asyncio.sleep(0.005)  # 5ms delay between chunks
+                    
+                except asyncio.TimeoutError:
+                    # No audio available - check if we should continue
+                    if self.pacing_queue.qsize() == 0:
+                        # No more audio, exit delivery loop
+                        break
+                        
+            except Exception as e:
+                log.error(f"Error in simple audio delivery: {e}")
+                break
+        
+        log.debug("Simple audio delivery stopped")
     
     def reset_state(self):
         """Reset internal streaming state."""

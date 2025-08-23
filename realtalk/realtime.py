@@ -237,6 +237,11 @@ class RealtimeClient:
         """Commit the audio buffer to trigger response generation."""
         if not self.session_active:
             return
+        
+        # Check if we have enough audio to commit (OpenAI requires at least 100ms)
+        if self._buffered_ms < 100.0:
+            log.debug(f"Skipping commit - insufficient audio buffer: {self._buffered_ms}ms (need 100ms)")
+            return
             
         try:
             await self._send_message({"type": "input_audio_buffer.commit"})
