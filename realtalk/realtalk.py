@@ -1074,13 +1074,18 @@ class RealTalk(red_commands.Cog):
             
             # Start voice capture
             await voice_capture.start()
-            
+
             # Do not start playing until we actually have audio; the callback above will trigger playback
 
             # Start monitor for idle/no-people auto-leave
             idle_timeout = await self.config.idle_timeout()
             monitor_task = asyncio.create_task(self._monitor_session(guild_id, idle_timeout))
             self.sessions[guild_id]["monitor_task"] = monitor_task
+            
+            # If wake gating is enabled, start a local watcher to detect end-of-speech and trigger Whisper gate
+            if wake_enabled:
+                wake_task = asyncio.create_task(self._wake_watch(guild_id))
+                self.sessions[guild_id]["wake_task"] = wake_task
             
             log.info(f"Started AI conversation session for guild {guild_id}")
             
@@ -1130,6 +1135,13 @@ class RealTalk(red_commands.Cog):
                     monitor_task.cancel()
                 except Exception:
                     pass
+            # Cancel wake task if present
+            wake_task = session.get("wake_task")
+            if wake_task:
+                try:
+                    wake_task.cancel()
+                except Exception:
+                    pass
             # Stop voice capture
             voice_capture = session.get("voice_capture")
             if voice_capture:
@@ -1158,6 +1170,68 @@ class RealTalk(red_commands.Cog):
                 del self.retry_state[guild_id]
                 
         log.info(f"Cleaned up session for guild {guild_id}")
+
+    async def _wake_watch(self, guild_id: int):
+        """Local watcher: detects silence and runs Whisper gate to trigger responses."""
+        try:
+            session = self.sessions.get(guild_id)
+            if not session:
+                return
+            voice_capture: VoiceCapture = session.get("voice_capture")
+            realtime_client: RealtimeClient = session.get("realtime_client")
+            if not voice_capture or not realtime_client:
+                return
+            # Config
+            silence_ms = await self.config.server_vad_silence_ms()
+            wake_words = [w.lower() for w in (await self.config.wake_words())]
+            wake_recent_secs = await self.config.wake_recent_seconds()
+            wake_model = await self.config.wake_whisper_model()
+            wake_lang = await self.config.wake_language()
+            api_key = await self._get_openai_api_key()
+            
+            speaking = False
+            last_any = 0.0
+            while guild_id in self.sessions:
+                # Determine latest activity time
+                try:
+                    if voice_capture.last_audio_time:
+                        last_any = max(voice_capture.last_audio_time.values())
+                except Exception:
+                    pass
+                now = time.time()
+                # Consider speaking if we've seen audio in the last 200ms
+                recently_active = (now - last_any) < 0.2
+                # Transition detection
+                if recently_active and not speaking:
+                    speaking = True
+                elif speaking and (now - last_any) >= (silence_ms / 1000.0):
+                    # Speaking just stopped according to local timer → gate with Whisper
+                    speaking = False
+                    try:
+                        wav = voice_capture.get_recent_audio_wav(seconds=wake_recent_secs, sample_rate=48000)
+                        if not wav:
+                            continue
+                        transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang)
+                        t = (transcript or "").lower()
+                        if any(w in t for w in wake_words if w):
+                            # Allow response then trigger
+                            try:
+                                setattr(realtime_client, "_response_active", False)
+                            except Exception:
+                                pass
+                            await realtime_client.commit_audio_buffer()
+                            await realtime_client.create_response()
+                        else:
+                            # Keep fallback suppressed
+                            try:
+                                setattr(realtime_client, "_response_active", True)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        log.error(f"Wake watch error: {e}")
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            return
 
     @red_commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
