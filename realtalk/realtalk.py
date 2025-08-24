@@ -73,6 +73,7 @@ class RealTalk(red_commands.Cog):
             "wake_local_model": "base.en",
             "wake_silence_ms": 400,
             "wake_activity_threshold": 0.008,
+            "wake_followup_seconds": 12,
         }
         
         default_guild = {
@@ -728,6 +729,15 @@ class RealTalk(red_commands.Cog):
         await self.config.wake_recent_seconds.set(seconds)
         await ctx.send(f"Wake recent window set to {seconds}s. Rejoin voice to apply.")
 
+    @set_group.command(name="wakefollowup")
+    async def set_wakefollowup(self, ctx: red_commands.Context, seconds: int):
+        """Set follow-up window seconds after a wake-verified utterance (0–60)."""
+        if seconds < 0 or seconds > 60:
+            await ctx.send("Invalid value. Choose 0..60 seconds")
+            return
+        await self.config.wake_followup_seconds.set(seconds)
+        await ctx.send(f"Wake follow-up window set to {seconds}s. Rejoin voice to apply.")
+
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
         # Check API key
@@ -1087,6 +1097,9 @@ class RealTalk(red_commands.Cog):
             
             # If wake gating is enabled, start a local watcher to detect end-of-speech and trigger Whisper gate
             if wake_enabled:
+                # Initialize follow-up state
+                self.sessions[guild_id]["wake_followup_user"] = None
+                self.sessions[guild_id]["wake_followup_expires"] = 0.0
                 wake_task = asyncio.create_task(self._wake_watch(guild_id))
                 self.sessions[guild_id]["wake_task"] = wake_task
             
@@ -1226,6 +1239,7 @@ class RealTalk(red_commands.Cog):
             use_local = await self.config.wake_local()
             local_model = await self.config.wake_local_model()
             api_key = await self._get_openai_api_key()
+            followup_secs = await self.config.wake_followup_seconds()
             
             speaking = False
             speech_start = 0.0
@@ -1240,25 +1254,46 @@ class RealTalk(red_commands.Cog):
                 if recently_active and not speaking:
                     speaking = True
                     speech_start = now
+                    log.debug(f"WakeWatch[{guild_id}]: speech started")
                 elif speaking and (now - last_any) >= (silence_ms / 1000.0):
                     # Speaking just stopped according to local timer → gate with Whisper
                     speaking = False
+                    log.debug(f"WakeWatch[{guild_id}]: speech stopped; gating")
                     try:
                         # Use only the segment since speech_start (+ small pre-roll), bounded by wake_recent_secs
                         seg_secs = max(0.8, min(wake_recent_secs, max(0.0, now - speech_start) + 0.3))
                         wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
                         if not wav:
+                            log.debug(f"WakeWatch[{guild_id}]: no audio to transcribe")
                             continue
+                        log.debug(f"WakeWatch[{guild_id}]: transcribing ({'local' if use_local else 'api'})")
                         transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=use_local, local_model=local_model)
                         t = (transcript or "").lower().strip()
+                        log.debug(f"WakeWatch[{guild_id}]: transcript='{t[:80]}{'...' if len(t)>80 else ''}'")
                         # Accept wake phrase anywhere in the utterance
                         match = any((w and w in t) for w in wake_words)
+                        log.debug(f"WakeWatch[{guild_id}]: wake match={match}")
+                        # Identify current primary speaker for follow-up policy
+                        user_id = getattr(voice_capture, 'primary_speaker', None)
+                        now_ts = time.time()
+                        # Retrieve follow-up state
+                        fu_user = session.get("wake_followup_user")
+                        fu_expires = session.get("wake_followup_expires", 0.0)
+                        allow_followup = fu_user is not None and user_id == fu_user and now_ts <= fu_expires
+
                         if match:
-                            # Trigger response for this utterance
+                            # Trigger response and open a follow-up window for this speaker
                             await realtime_client.commit_audio_buffer()
                             await realtime_client.create_response()
+                            session["wake_followup_user"] = user_id
+                            session["wake_followup_expires"] = now_ts + float(followup_secs)
+                            log.debug(f"WakeWatch[{guild_id}]: follow-up window opened for {user_id} until {session['wake_followup_expires']:.1f}")
+                        elif allow_followup:
+                            await realtime_client.commit_audio_buffer()
+                            await realtime_client.create_response()
+                            log.debug(f"WakeWatch[{guild_id}]: follow-up allowed for user {user_id}")
                         else:
-                            pass
+                            log.debug(f"WakeWatch[{guild_id}]: no wake and not in follow-up window; ignoring")
                     except Exception as e:
                         log.error(f"Wake watch error: {e}")
                 await asyncio.sleep(0.1)

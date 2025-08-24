@@ -426,7 +426,13 @@ class RealtimeClient:
                     
             elif event_type == "response.audio.done":
                 log.debug("Response audio stream completed")
-                # Audio streaming for this response is complete
+                # Treat this as response completion for audio purposes
+                self._response_active = False
+                if self.on_response_done:
+                    try:
+                        self.on_response_done()
+                    except Exception:
+                        pass
                     
             elif event_type == "response.done":
                 log.info("✅ Response completed")
