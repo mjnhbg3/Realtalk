@@ -1041,6 +1041,9 @@ class RealTalk(red_commands.Cog):
             wake_recent_secs = await self.config.wake_recent_seconds()
             wake_model = await self.config.wake_whisper_model()
             wake_lang = await self.config.wake_language()
+            wake_local = await self.config.wake_local()
+            wake_local_model = await self.config.wake_local_model()
+            followup_secs = await self.config.wake_followup_seconds()
             fast_followup_after_ai = await self.config.wake_followup_after_ai_secs()
             wake_state = {"detected": False, "ts": 0.0}
             if wake_enabled:
@@ -1136,8 +1139,44 @@ class RealTalk(red_commands.Cog):
                     log.error(f"Error handling speech interruption: {e}")
             
             def _on_speech_stopped():
-                # In wake mode we rely on the local wake watcher; otherwise no-op
-                return
+                # Gate on server VAD too for reliability
+                try:
+                    if not wake_enabled:
+                        return
+                    async def _gate_on_event():
+                        try:
+                            session = self.sessions.get(guild_id)
+                            if not session:
+                                return
+                            # Fast follow-up window after AI
+                            fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
+                            if time.time() <= fu_ai_until:
+                                await realtime_client.commit_audio_buffer()
+                                await realtime_client.create_response()
+                                session["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
+                                return
+                            # Otherwise transcribe last utterance and check wake words or long follow-up window
+                            seg_secs = max(0.8, min(wake_recent_secs, 4.0))
+                            wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
+                            api_key = await self._get_openai_api_key()
+                            transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=wake_local, local_model=wake_local_model)
+                            t = (transcript or "").lower().strip()
+                            match = any((w and w in t) for w in wake_words)
+                            now_ts = time.time()
+                            fu_expires = session.get("wake_followup_expires", 0.0)
+                            if match:
+                                await realtime_client.commit_audio_buffer()
+                                await realtime_client.create_response()
+                                session["wake_followup_expires"] = now_ts + float(followup_secs)
+                            elif now_ts <= fu_expires:
+                                await realtime_client.commit_audio_buffer()
+                                await realtime_client.create_response()
+                                session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
+                        except Exception:
+                            pass
+                    asyncio.create_task(_gate_on_event())
+                except Exception:
+                    pass
             
             # Reset playback state on response boundaries
             def _on_resp_start():
