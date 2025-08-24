@@ -1078,8 +1078,17 @@ class RealTalk(red_commands.Cog):
                     voice_capture.set_activity_threshold(await self.config.wake_activity_threshold())
                 except Exception:
                     pass
-                # We will use Whisper for wake detection at speech stop
-                realtime_client.on_input_transcript = None
+                # Also listen for server-side transcripts to catch wake phrases early
+                def _on_server_transcript(text: str):
+                    try:
+                        t = (text or "").strip()
+                        if not t:
+                            return
+                        if self._wake_matches(t, wake_words):
+                            asyncio.create_task(self._maybe_trigger_followup(guild_id, realtime_client, reason="svr-transcript-wake"))
+                    except Exception:
+                        pass
+                realtime_client.on_input_transcript = _on_server_transcript
             
             # Audio playback completion callback
             def _audio_finished(error):
