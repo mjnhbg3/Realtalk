@@ -1148,16 +1148,31 @@ class RealTalk(red_commands.Cog):
             def _on_speech_started():
                 try:
                     nonlocal current_audio_source
-                    # Immediately stop Discord playback
-                    if voice_client and voice_client.is_playing():
-                        voice_client.stop()
-                    # Clear audio buffers to prevent continuation
-                    if current_audio_source:
-                        current_audio_source.interrupt_playback()
-                    # Open a short barge-in grace window to allow follow-up without wake
-                    if guild_id in self.sessions:
-                        self.sessions[guild_id]["wake_barge_grace_until"] = time.time() + 3.0
-                        log.debug("Barge-in detected; grace window opened for 3s")
+                    session = self.sessions.get(guild_id)
+                    if not session:
+                        return
+                    # Cancel any existing barge task
+                    bt = session.get("barge_task")
+                    if bt:
+                        try:
+                            bt.cancel()
+                        except Exception:
+                            pass
+                    async def _barge_task():
+                        try:
+                            await asyncio.sleep(0.12)
+                            if voice_client and voice_client.is_playing() and getattr(realtime_client, '_response_active', False):
+                                voice_client.stop()
+                                if current_audio_source:
+                                    current_audio_source.interrupt_playback()
+                                session["wake_barge_grace_until"] = time.time() + 3.0
+                                log.debug("Barge-in confirmed; audio stopped and grace window opened")
+                        except asyncio.CancelledError:
+                            return
+                        except Exception as e:
+                            log.error(f"Barge task error: {e}")
+                    task = asyncio.create_task(_barge_task())
+                    session["barge_task"] = task
                 except Exception as e:
                     log.error(f"Error handling speech interruption: {e}")
             
@@ -1171,11 +1186,17 @@ class RealTalk(red_commands.Cog):
                             session = self.sessions.get(guild_id)
                             if not session:
                                 return
+                            # Cancel pending barge debounce if any
+                            bt = session.get("barge_task")
+                            if bt:
+                                try:
+                                    bt.cancel()
+                                except Exception:
+                                    pass
                             # 1) Barge-in grace window (user spoke over AI)
                             grace_until = session.get("wake_barge_grace_until", 0.0) or 0.0
                             if time.time() <= grace_until:
-                                await realtime_client.commit_audio_buffer()
-                                await realtime_client.create_response()
+                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="barge-grace")
                                 log.debug("Follow-up triggered via barge-in grace window")
                                 # Slight extension to allow rapid back-and-forth after barge-in
                                 session["wake_barge_grace_until"] = time.time() + 1.5
@@ -1183,8 +1204,7 @@ class RealTalk(red_commands.Cog):
                             # 2) Fast follow-up window after AI
                             fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
                             if time.time() <= fu_ai_until:
-                                await realtime_client.commit_audio_buffer()
-                                await realtime_client.create_response()
+                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="fast-followup")
                                 session["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
                                 return
                             # Otherwise transcribe last utterance and check wake words or long follow-up window
@@ -1197,12 +1217,10 @@ class RealTalk(red_commands.Cog):
                             now_ts = time.time()
                             fu_expires = session.get("wake_followup_expires", 0.0)
                             if match:
-                                await realtime_client.commit_audio_buffer()
-                                await realtime_client.create_response()
+                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="wake-match")
                                 session["wake_followup_expires"] = now_ts + float(followup_secs)
                             elif now_ts <= fu_expires:
-                                await realtime_client.commit_audio_buffer()
-                                await realtime_client.create_response()
+                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="long-followup")
                                 session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
                         except Exception:
                             pass
@@ -1218,6 +1236,8 @@ class RealTalk(red_commands.Cog):
                     if current_audio_source:
                         current_audio_source.reset_state()
                         log.debug("Reset audio source state for new response")
+                    if guild_id in self.sessions:
+                        self.sessions[guild_id]["response_inflight"] = False
                 except Exception:
                     pass
             
@@ -1277,6 +1297,9 @@ class RealTalk(red_commands.Cog):
                 self.sessions[guild_id]["wake_followup_user"] = None
                 self.sessions[guild_id]["wake_followup_expires"] = 0.0
                 self.sessions[guild_id]["wake_barge_grace_until"] = 0.0
+                self.sessions[guild_id]["gate_next_allowed"] = 0.0
+                self.sessions[guild_id]["response_inflight"] = False
+                self.sessions[guild_id]["barge_task"] = None
                 wake_task = asyncio.create_task(self._wake_watch(guild_id))
                 self.sessions[guild_id]["wake_task"] = wake_task
             
@@ -1324,6 +1347,49 @@ class RealTalk(red_commands.Cog):
                 # fall back to remote
         if not api_key or not wav_bytes:
             return None
+
+    async def _clear_inflight_after(self, guild_id: int, delay: float = 5.0):
+        try:
+            await asyncio.sleep(delay)
+            session = self.sessions.get(guild_id)
+            if session:
+                session["response_inflight"] = False
+                log.debug(f"Inflight gating cleared after {delay}s timeout for guild {guild_id}")
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            pass
+
+    async def _maybe_trigger_followup(self, guild_id: int, realtime_client: RealtimeClient, reason: str = "") -> bool:
+        """Safely trigger commit+response once, deduping across watchers and events."""
+        session = self.sessions.get(guild_id)
+        if not session or not realtime_client:
+            return False
+        now = time.time()
+        # Deduplicate: don't trigger while a response is active or in-flight
+        if getattr(realtime_client, '_response_active', False):
+            log.debug(f"Skip trigger ({reason}) - response already active")
+            return False
+        if session.get("response_inflight"):
+            log.debug(f"Skip trigger ({reason}) - response inflight")
+            return False
+        if now < (session.get("gate_next_allowed", 0.0) or 0.0):
+            log.debug(f"Skip trigger ({reason}) - gate cooldown active")
+            return False
+        # Mark inflight and cooldown
+        session["response_inflight"] = True
+        session["gate_next_allowed"] = now + 1.0
+        try:
+            await realtime_client.commit_audio_buffer()
+            await realtime_client.create_response()
+            log.debug(f"Triggered follow-up via {reason}")
+            # Safety: clear inflight if no response events arrive
+            asyncio.create_task(self._clear_inflight_after(guild_id, 6.0))
+            return True
+        except Exception as e:
+            log.error(f"Error triggering follow-up ({reason}): {e}")
+            session["response_inflight"] = False
+            return False
         url = "https://api.openai.com/v1/audio/transcriptions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -1441,16 +1507,14 @@ class RealTalk(red_commands.Cog):
                         # 0) Barge-in grace window (opened on interruption)
                         grace_until = session.get("wake_barge_grace_until", 0.0) or 0.0
                         if time.time() <= grace_until:
-                            await realtime_client.commit_audio_buffer()
-                            await realtime_client.create_response()
+                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-barge-grace")
                             session["wake_barge_grace_until"] = time.time() + 1.5
                             log.debug(f"WakeWatch[{guild_id}]: triggered via barge-in grace window")
                             continue
                         # Fast path: If within follow-up-after-AI window, trigger immediately without transcription
                         fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
                         if time.time() <= fu_ai_until:
-                            await realtime_client.commit_audio_buffer()
-                            await realtime_client.create_response()
+                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-fast-followup")
                             log.debug(f"WakeWatch[{guild_id}]: within follow-up-after-AI window; triggered without wake")
                             # Refresh the AI follow-up window for rapid back-and-forth
                             session["wake_followup_until"] = time.time() + float(followup_after_ai)
@@ -1470,8 +1534,7 @@ class RealTalk(red_commands.Cog):
                         log.debug(f"WakeWatch[{guild_id}]: wake match={match}")
                         if match:
                             # Trigger response and open a follow-up window for this speaker
-                            await realtime_client.commit_audio_buffer()
-                            await realtime_client.create_response()
+                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-wake-match")
                             # Time-based follow-up window (speaker-agnostic)
                             now_ts = time.time()
                             session["wake_followup_expires"] = now_ts + float(followup_secs)
@@ -1481,8 +1544,7 @@ class RealTalk(red_commands.Cog):
                             now_ts = time.time()
                             fu_expires = session.get("wake_followup_expires", 0.0)
                             if now_ts <= fu_expires:
-                                await realtime_client.commit_audio_buffer()
-                                await realtime_client.create_response()
+                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-long-followup")
                                 # Refresh window slightly for quick back-and-forth
                                 session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
                                 log.debug(f"WakeWatch[{guild_id}]: in follow-up window; triggered; extended briefly")
