@@ -1208,8 +1208,8 @@ class RealTalk(red_commands.Cog):
                 except Exception:
                     pass
             
-            def _on_resp_done():
-                # Response completed - mark stream as finished so it can end properly
+            def _on_resp_audio_done():
+                # Response audio completed - mark stream as finished so it can end properly
                 try:
                     nonlocal current_audio_source
                     if current_audio_source:
@@ -1218,13 +1218,6 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
-                    # Safety: if Discord still thinks we're playing, force-stop to clear speaking state
-                    try:
-                        if voice_client and voice_client.is_playing():
-                            voice_client.stop()
-                            log.debug("Forced Discord voice_client.stop() to clear speaking state")
-                    except Exception:
-                        pass
                     # Open a short follow-up window after AI speaks
                     if wake_enabled and guild_id in self.sessions:
                         self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
@@ -1235,7 +1228,8 @@ class RealTalk(red_commands.Cog):
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
             realtime_client.on_input_audio_buffer_speech_stopped = _on_speech_stopped
             realtime_client.on_response_started = _on_resp_start
-            realtime_client.on_response_done = _on_resp_done
+            # End audio cleanly only when audio is actually done
+            realtime_client.on_response_audio_done = _on_resp_audio_done
             
             # Start voice capture
             await voice_capture.start()

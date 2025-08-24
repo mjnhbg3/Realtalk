@@ -52,6 +52,8 @@ class RealtimeClient:
         self.on_input_transcript: Optional[Callable[[str], None]] = None
         self.on_error: Optional[Callable[[Dict[str, Any]], None]] = None
         self.on_response_started: Optional[Callable[[], None]] = None
+        # Separate audio completion from overall response completion to avoid early cutoffs
+        self.on_response_audio_done: Optional[Callable[[], None]] = None
         self.on_response_done: Optional[Callable[[], None]] = None
         
         # Connection management
@@ -440,11 +442,11 @@ class RealtimeClient:
                     
             elif event_type == "response.audio.done":
                 log.debug("Response audio stream completed")
-                # Treat this as response completion for audio purposes
+                # Audio has fully ended; notify audio-done callback
                 self._response_active = False
-                if self.on_response_done:
+                if self.on_response_audio_done:
                     try:
-                        self.on_response_done()
+                        self.on_response_audio_done()
                     except Exception:
                         pass
                     
