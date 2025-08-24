@@ -1041,6 +1041,7 @@ class RealTalk(red_commands.Cog):
             wake_recent_secs = await self.config.wake_recent_seconds()
             wake_model = await self.config.wake_whisper_model()
             wake_lang = await self.config.wake_language()
+            fast_followup_after_ai = await self.config.wake_followup_after_ai_secs()
             wake_state = {"detected": False, "ts": 0.0}
             if wake_enabled:
                 # Suppress auto responses at the server
@@ -1160,13 +1161,9 @@ class RealTalk(red_commands.Cog):
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
                     # Open a short follow-up window after AI speaks
-                    try:
-                        if wake_enabled and guild_id in self.sessions:
-                            fu_ai = await self.config.wake_followup_after_ai_secs()
-                            self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fu_ai)
-                            log.debug(f"Follow-up window after AI opened for {fu_ai}s")
-                    except Exception:
-                        pass
+                    if wake_enabled and guild_id in self.sessions:
+                        self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
+                        log.debug(f"Follow-up window after AI opened for {fast_followup_after_ai}s")
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
             
