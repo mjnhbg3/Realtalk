@@ -504,6 +504,7 @@ class RateLimitedAudioSource(discord.AudioSource):
         
         # Audio duration tracking for rate calculation
         self.accumulated_audio_time = 0.0
+        self._last_ingest_ts = time.monotonic()
         
         # Performance monitoring
         self.rate_control_stats = {
@@ -632,6 +633,14 @@ class RateLimitedAudioSource(discord.AudioSource):
                         # Stop pacing loop gracefully
                         self._stop_pacing = True
                         continue
+                else:
+                    # Auto-finish on inactivity when nothing buffered anywhere
+                    if (self.pacing_queue.qsize() == 0 and len(self._pcm24_buffer) == 0 and
+                        self.pcm_source.queue_size == 0):
+                        if (loop.time() - self._last_ingest_ts) > 1.2:
+                            self.pcm_source.finish_stream()
+                            self._stop_pacing = True
+                            continue
                 
             except asyncio.CancelledError:
                 log.debug("Audio pacing loop cancelled")
@@ -663,6 +672,7 @@ class RateLimitedAudioSource(discord.AudioSource):
             
             # Track accumulated audio time for monitoring
             self.accumulated_audio_time += duration_ms
+            self._last_ingest_ts = time.monotonic()
             
             # Queue for paced delivery with overflow protection
             try:
@@ -781,6 +791,10 @@ class RateLimitedAudioSource(discord.AudioSource):
                     # If finish was requested, end the PCM stream now that it's drained
                     if self._finish_when_drained:
                         if self.pcm_source.queue_size == 0:
+                            self.pcm_source.finish_stream()
+                    else:
+                        # Auto-finish if no new audio has arrived recently and PCM drained
+                        if self.pcm_source.queue_size == 0 and (asyncio.get_event_loop().time() - self._last_ingest_ts) > 1.2:
                             self.pcm_source.finish_stream()
                     break
 

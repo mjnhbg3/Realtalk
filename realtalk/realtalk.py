@@ -1279,6 +1279,10 @@ class RealTalk(red_commands.Cog):
                         # Clear any long follow-up window when a new AI turn ends
                         self.sessions[guild_id]["wake_followup_expires"] = 0.0
                         log.debug(f"(Fallback) Follow-up window after response.done opened for {fast_followup_after_ai}s")
+                    # Also ensure we finish the audio stream if audio.done wasn't seen
+                    nonlocal current_audio_source
+                    if current_audio_source:
+                        current_audio_source.finish_stream()
                 except Exception:
                     pass
             
