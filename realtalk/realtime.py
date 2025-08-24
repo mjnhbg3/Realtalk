@@ -69,6 +69,11 @@ class RealtimeClient:
         self._response_active: bool = False
         self._last_output_ts: float = 0.0  # Track output timing for rate control
         
+        # Conversation stats
+        self.conversation_items: int = 0
+        self.responses_started: int = 0
+        self.responses_completed: int = 0
+        
         # Session state
         self.session_config = {
             "modalities": ["text", "audio"],
@@ -344,6 +349,7 @@ class RealtimeClient:
                 
             elif event_type == "response.created":
                 log.info("✅ OpenAI response generation started")
+                self.responses_started += 1
                 # Mark response as active even when server auto-creates it
                 self._response_active = True
                 if self.on_response_started:
@@ -373,6 +379,7 @@ class RealtimeClient:
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
+                self.conversation_items += 1
                 if self.on_conversation_item_created:
                     self.on_conversation_item_created(event)
                 # Try to surface any input transcripts for wake-word handling
@@ -437,6 +444,7 @@ class RealtimeClient:
             elif event_type == "response.done":
                 log.info("✅ Response completed")
                 self._response_active = False
+                self.responses_completed += 1
                 if self.on_response_done:
                     try:
                         self.on_response_done()

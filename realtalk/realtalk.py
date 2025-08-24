@@ -618,6 +618,78 @@ class RealTalk(red_commands.Cog):
         ]
         await ctx.send("\n".join(lines))
 
+    @show_group.command(name="wake")
+    async def show_wake(self, ctx: red_commands.Context):
+        """Show current wake-word runtime status and windows."""
+        guild_id = ctx.guild.id
+        wake_enabled = await self.config.wake_word_enabled()
+        if not wake_enabled:
+            await ctx.send("Wake-word gating is disabled.")
+            return
+
+        session = self.sessions.get(guild_id)
+        now = time.time()
+        fast_until = 0.0
+        long_until = 0.0
+        last_voice = 0.0
+        if session:
+            fast_until = session.get("wake_followup_until", 0.0) or 0.0
+            long_until = session.get("wake_followup_expires", 0.0) or 0.0
+            vc = session.get("voice_capture")
+            if vc and hasattr(vc, 'last_voice_activity_ts'):
+                try:
+                    last_voice = float(getattr(vc, 'last_voice_activity_ts') or 0.0)
+                except Exception:
+                    last_voice = 0.0
+
+        fast_rem = max(0, int(fast_until - now))
+        long_rem = max(0, int(long_until - now))
+
+        wake_words = await self.config.wake_words()
+        wake_local = await self.config.wake_local()
+        wake_local_model = await self.config.wake_local_model()
+        wake_model = await self.config.wake_whisper_model()
+        wake_lang = await self.config.wake_language()
+        sense = await self.config.wake_activity_threshold()
+        silence = await self.config.wake_silence_ms()
+
+        lines = [
+            "**Wake Runtime Status**",
+            f"Enabled: `True`",
+            f"Wake phrases: {', '.join([w for w in wake_words])}",
+            f"Transcription: {'local faster-whisper '+wake_local_model if wake_local else 'OpenAI Whisper '+wake_model} (lang={wake_lang})",
+            f"Activity threshold: {sense}, end-of-speech: {silence}ms",
+            f"Fast follow-up remaining: {fast_rem}s",
+            f"Long follow-up remaining: {long_rem}s",
+            f"Last voice activity: {int(now - last_voice)}s ago" if last_voice else "Last voice activity: unknown",
+        ]
+        await ctx.send("\n".join(lines))
+
+    @show_group.command(name="session")
+    async def show_session(self, ctx: red_commands.Context):
+        """Show current session runtime and conversation stats."""
+        guild_id = ctx.guild.id
+        session = self.sessions.get(guild_id)
+        if not session:
+            await ctx.send("No active session in this guild.")
+            return
+        rc = session.get("realtime_client")
+        fast_until = session.get("wake_followup_until", 0.0) or 0.0
+        long_until = session.get("wake_followup_expires", 0.0) or 0.0
+        now = time.time()
+        items = getattr(rc, 'conversation_items', 0)
+        rsp_started = getattr(rc, 'responses_started', 0)
+        rsp_completed = getattr(rc, 'responses_completed', 0)
+        lines = [
+            "**Session Status**",
+            f"Realtime connected: `{bool(rc and rc.connected)}`",
+            f"Conversation items: {items}",
+            f"Responses: {rsp_completed}/{rsp_started} completed",
+            f"Fast follow-up remaining: {max(0, int(fast_until - now))}s",
+            f"Long follow-up remaining: {max(0, int(long_until - now))}s",
+        ]
+        await ctx.send("\n".join(lines))
+
     @set_group.command(name="threshold")
     async def set_threshold(self, ctx: red_commands.Context, value: float):
         """Set local audio activity threshold (0.0001–1.0). Lower = more sensitive."""
@@ -738,6 +810,15 @@ class RealTalk(red_commands.Cog):
             return
         await self.config.wake_followup_seconds.set(seconds)
         await ctx.send(f"Wake follow-up window set to {seconds}s. Rejoin voice to apply.")
+
+    @set_group.command(name="wakefollowupafterai")
+    async def set_wakefollowup_after_ai(self, ctx: red_commands.Context, seconds: int):
+        """Set fast follow-up window after AI finishes (0–10 seconds)."""
+        if seconds < 0 or seconds > 10:
+            await ctx.send("Invalid value. Choose 0..10 seconds")
+            return
+        await self.config.wake_followup_after_ai_secs.set(seconds)
+        await ctx.send(f"Fast follow-up after AI set to {seconds}s. Rejoin voice to apply.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
