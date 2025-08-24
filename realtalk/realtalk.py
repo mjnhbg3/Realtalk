@@ -1233,7 +1233,10 @@ class RealTalk(red_commands.Cog):
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
                     # Open a short follow-up window after AI speaks
                     if wake_enabled and guild_id in self.sessions:
-                        self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
+                        nowt = time.time()
+                        self.sessions[guild_id]["wake_followup_until"] = nowt + float(fast_followup_after_ai)
+                        # IMPORTANT: require wake again after this fast window; clear any prior long window
+                        self.sessions[guild_id]["wake_followup_expires"] = 0.0
                         log.debug(f"Follow-up window after AI opened for {fast_followup_after_ai}s")
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
@@ -1242,7 +1245,10 @@ class RealTalk(red_commands.Cog):
             def _on_resp_done_minimal():
                 try:
                     if wake_enabled and guild_id in self.sessions:
-                        self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
+                        nowt = time.time()
+                        self.sessions[guild_id]["wake_followup_until"] = nowt + float(fast_followup_after_ai)
+                        # Clear any long follow-up window when a new AI turn ends
+                        self.sessions[guild_id]["wake_followup_expires"] = 0.0
                         log.debug(f"(Fallback) Follow-up window after response.done opened for {fast_followup_after_ai}s")
                 except Exception:
                     pass
