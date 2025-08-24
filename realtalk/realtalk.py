@@ -9,7 +9,8 @@ connection management to handle Discord's infrastructure issues.
 import asyncio
 import logging
 import time
-from typing import Optional, Dict, Any
+import re
+from typing import Optional, Dict, Any, List
 import aiohttp
 
 import discord
@@ -64,7 +65,8 @@ class RealTalk(red_commands.Cog):
             "audio_buffer_target_ms": 200,  # Target buffer size for pacing (ms)
             # Wake-word gate (optional)
             "wake_word_enabled": False,
-            "wake_words": ["hey dukebot", "dukebot"],
+            # Include spaced variants to improve matching out-of-the-box
+            "wake_words": ["hey dukebot", "dukebot", "hey duke bot", "duke bot"],
             "wake_window_ms": 6000,
             "wake_recent_seconds": 5,
             "wake_whisper_model": "whisper-1",
@@ -72,7 +74,8 @@ class RealTalk(red_commands.Cog):
             "wake_local": False,
             "wake_local_model": "base.en",
             "wake_silence_ms": 400,
-            "wake_activity_threshold": 0.008,
+            # Slightly more sensitive default for local VAD
+            "wake_activity_threshold": 0.004,
             "wake_followup_seconds": 12,
             "wake_followup_after_ai_secs": 4,
         }
@@ -618,6 +621,22 @@ class RealTalk(red_commands.Cog):
         ]
         await ctx.send("\n".join(lines))
 
+    # --- Wake phrase matching helper ---
+    def _normalize_text(self, s: str) -> str:
+        try:
+            return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+        except Exception:
+            return (s or "").lower().replace(" ", "")
+
+    def _wake_matches(self, text: str, phrases: List[str]) -> bool:
+        norm_t = self._normalize_text(text)
+        for p in phrases or []:
+            if not p:
+                continue
+            if self._normalize_text(p) in norm_t:
+                return True
+        return False
+
     @show_group.command(name="wake")
     async def show_wake(self, ctx: red_commands.Context):
         """Show current wake-word runtime status and windows."""
@@ -1160,8 +1179,8 @@ class RealTalk(red_commands.Cog):
                             wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
                             api_key = await self._get_openai_api_key()
                             transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=wake_local, local_model=wake_local_model)
-                            t = (transcript or "").lower().strip()
-                            match = any((w and w in t) for w in wake_words)
+                            t = (transcript or "").strip()
+                            match = self._wake_matches(t, wake_words)
                             now_ts = time.time()
                             fu_expires = session.get("wake_followup_expires", 0.0)
                             if match:
@@ -1411,10 +1430,10 @@ class RealTalk(red_commands.Cog):
                             continue
                         log.debug(f"WakeWatch[{guild_id}]: transcribing ({'local' if use_local else 'api'})")
                         transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=use_local, local_model=local_model)
-                        t = (transcript or "").lower().strip()
+                        t = (transcript or "").strip()
                         log.debug(f"WakeWatch[{guild_id}]: transcript='{t[:80]}{'...' if len(t)>80 else ''}'")
                         # Accept wake phrase anywhere in the utterance
-                        match = any((w and w in t) for w in wake_words)
+                        match = self._wake_matches(t, wake_words)
                         log.debug(f"WakeWatch[{guild_id}]: wake match={match}")
                         if match:
                             # Trigger response and open a follow-up window for this speaker
