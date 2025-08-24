@@ -74,6 +74,7 @@ class RealTalk(red_commands.Cog):
             "wake_silence_ms": 400,
             "wake_activity_threshold": 0.008,
             "wake_followup_seconds": 12,
+            "wake_followup_after_ai_secs": 4,
         }
         
         default_guild = {
@@ -1077,6 +1078,14 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
+                    # Open a short follow-up window after AI speaks
+                    try:
+                        if wake_enabled and guild_id in self.sessions:
+                            fu_ai = await self.config.wake_followup_after_ai_secs()
+                            self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fu_ai)
+                            log.debug(f"Follow-up window after AI opened for {fu_ai}s")
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
             
@@ -1240,6 +1249,7 @@ class RealTalk(red_commands.Cog):
             local_model = await self.config.wake_local_model()
             api_key = await self._get_openai_api_key()
             followup_secs = await self.config.wake_followup_seconds()
+            followup_after_ai = await self.config.wake_followup_after_ai_secs()
             
             speaking = False
             speech_start = 0.0
@@ -1260,6 +1270,15 @@ class RealTalk(red_commands.Cog):
                     speaking = False
                     log.debug(f"WakeWatch[{guild_id}]: speech stopped; gating")
                     try:
+                        # Fast path: If within follow-up-after-AI window, trigger immediately without transcription
+                        fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
+                        if time.time() <= fu_ai_until:
+                            await realtime_client.commit_audio_buffer()
+                            await realtime_client.create_response()
+                            log.debug(f"WakeWatch[{guild_id}]: within follow-up-after-AI window; triggered without wake")
+                            # Refresh the AI follow-up window for rapid back-and-forth
+                            session["wake_followup_until"] = time.time() + float(followup_after_ai)
+                            continue
                         # Use only the segment since speech_start (+ small pre-roll), bounded by wake_recent_secs
                         seg_secs = max(0.8, min(wake_recent_secs, max(0.0, now - speech_start) + 0.3))
                         wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
@@ -1273,27 +1292,26 @@ class RealTalk(red_commands.Cog):
                         # Accept wake phrase anywhere in the utterance
                         match = any((w and w in t) for w in wake_words)
                         log.debug(f"WakeWatch[{guild_id}]: wake match={match}")
-                        # Identify current primary speaker for follow-up policy
-                        user_id = getattr(voice_capture, 'primary_speaker', None)
-                        now_ts = time.time()
-                        # Retrieve follow-up state
-                        fu_user = session.get("wake_followup_user")
-                        fu_expires = session.get("wake_followup_expires", 0.0)
-                        allow_followup = fu_user is not None and user_id == fu_user and now_ts <= fu_expires
-
                         if match:
                             # Trigger response and open a follow-up window for this speaker
                             await realtime_client.commit_audio_buffer()
                             await realtime_client.create_response()
-                            session["wake_followup_user"] = user_id
+                            # Time-based follow-up window (speaker-agnostic)
+                            now_ts = time.time()
                             session["wake_followup_expires"] = now_ts + float(followup_secs)
-                            log.debug(f"WakeWatch[{guild_id}]: follow-up window opened for {user_id} until {session['wake_followup_expires']:.1f}")
-                        elif allow_followup:
-                            await realtime_client.commit_audio_buffer()
-                            await realtime_client.create_response()
-                            log.debug(f"WakeWatch[{guild_id}]: follow-up allowed for user {user_id}")
+                            log.debug(f"WakeWatch[{guild_id}]: follow-up window opened for {followup_secs}s")
                         else:
-                            log.debug(f"WakeWatch[{guild_id}]: no wake and not in follow-up window; ignoring")
+                            # If within time-based follow-up window (from prior wake), allow without wake
+                            now_ts = time.time()
+                            fu_expires = session.get("wake_followup_expires", 0.0)
+                            if now_ts <= fu_expires:
+                                await realtime_client.commit_audio_buffer()
+                                await realtime_client.create_response()
+                                # Refresh window slightly for quick back-and-forth
+                                session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
+                                log.debug(f"WakeWatch[{guild_id}]: in follow-up window; triggered; extended briefly")
+                            else:
+                                log.debug(f"WakeWatch[{guild_id}]: no wake and not in follow-up window; ignoring")
                     except Exception as e:
                         log.error(f"Wake watch error: {e}")
                 await asyncio.sleep(0.1)
