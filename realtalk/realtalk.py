@@ -1199,6 +1199,13 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
+                    # Safety: if Discord still thinks we're playing, force-stop to clear speaking state
+                    try:
+                        if voice_client and voice_client.is_playing():
+                            voice_client.stop()
+                            log.debug("Forced Discord voice_client.stop() to clear speaking state")
+                    except Exception:
+                        pass
                     # Open a short follow-up window after AI speaks
                     if wake_enabled and guild_id in self.sessions:
                         self.sessions[guild_id]["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
