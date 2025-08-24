@@ -241,18 +241,20 @@ class RealtimeClient:
             log.error(f"Error sending audio chunk: {e}")
 
     async def commit_audio_buffer(self):
-        """Commit the audio buffer to trigger response generation."""
+        """Commit the audio buffer to trigger response generation.
+
+        Always ask the server to commit; it handles empty buffers gracefully. This avoids
+        race conditions where local accounting underestimates buffered audio (e.g., after
+        speech_stopped when auto-create is disabled for wake gating).
+        """
         if not self.session_active:
             return
-        
-        # Check if we have enough audio to commit (OpenAI requires at least 100ms)
-        if self._buffered_ms < 100.0:
-            log.debug(f"Skipping commit - insufficient audio buffer: {self._buffered_ms}ms (need 100ms)")
-            return
-            
         try:
             await self._send_message({"type": "input_audio_buffer.commit"})
+            # Do not force-reset here; rely on server events to reflect actual state
+            # but keep a conservative reset to avoid runaway accumulation
             self._buffered_ms = 0.0
+            log.debug("Sent input_audio_buffer.commit")
         except Exception as e:
             log.error(f"Error committing audio buffer: {e}")
 
@@ -371,11 +373,16 @@ class RealtimeClient:
                     log.error(f"Error cancelling response: {e}")
                     
             elif event_type == "input_audio_buffer.speech_stopped":
-                log.info("🔇 Server VAD detected speech STOP - should trigger response")
+                log.info("🔇 Server VAD detected speech STOP")
                 if self.on_input_audio_buffer_speech_stopped:
                     self.on_input_audio_buffer_speech_stopped()
-                # With create_response: true, OpenAI automatically commits and generates response
-                self._buffered_ms = 0.0
+                # Only zero local buffer accounting when server auto-creates a response.
+                try:
+                    td = (self.session_config or {}).get("turn_detection", {})
+                    if td.get("create_response", True):
+                        self._buffered_ms = 0.0
+                except Exception:
+                    pass
                     
             elif event_type == "conversation.item.created":
                 log.debug("Conversation item created")
