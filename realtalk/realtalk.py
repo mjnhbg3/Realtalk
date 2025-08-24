@@ -1325,36 +1325,50 @@ class RealTalk(red_commands.Cog):
         If use_local is True and faster-whisper is available, run locally.
         Otherwise, call OpenAI's Whisper API.
         """
+        # Prefer local faster-whisper if enabled
         if use_local:
             try:
-                # Try local faster-whisper
                 from faster_whisper import WhisperModel
                 import numpy as np
-                # Convert WAV to PCM samples (extract data after header)
-                # Minimal WAV parser: find 'data' chunk
-                b = wav_bytes
+                b = wav_bytes or b""
                 idx = b.find(b"data")
                 if idx == -1 or idx + 8 > len(b):
                     raise RuntimeError("Invalid WAV data chunk")
                 data_size = int.from_bytes(b[idx+4:idx+8], 'little')
                 pcm = b[idx+8: idx+8+data_size]
-                # 48k mono int16 -> 16k float32
                 a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
                 if a.size == 0:
                     return None
-                # Downsample 48k->16k via 3x decimation (average triads)
                 n = (a.size // 3) * 3
                 a = a[:n].reshape(-1, 3).mean(axis=1)
                 audio16k = (a / 32768.0).astype(np.float32)
-                # Run model
                 model_inst = WhisperModel(local_model, compute_type="int8")
                 segments, info = model_inst.transcribe(audio16k, language=language)
-                text = "".join(seg.text for seg in segments).strip()
-                return text
+                return "".join(seg.text for seg in segments).strip()
             except Exception as e:
                 log.info(f"Local whisper unavailable/fallback: {e}")
-                # fall back to remote
+
+        # Remote Whisper API fallback
         if not api_key or not wav_bytes:
+            return None
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        data = aiohttp.FormData()
+        data.add_field("file", wav_bytes, filename="wake.wav", content_type="audio/wav")
+        data.add_field("model", model)
+        if language:
+            data.add_field("language", language)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status != 200:
+                        txt = await resp.text()
+                        log.error(f"Whisper transcription failed: {resp.status} {txt}")
+                        return None
+                    payload = await resp.json()
+                    return payload.get("text")
+        except Exception as e:
+            log.error(f"Error calling Whisper API: {e}")
             return None
 
     async def _clear_inflight_after(self, guild_id: int, delay: float = 5.0):
@@ -1399,27 +1413,6 @@ class RealTalk(red_commands.Cog):
             log.error(f"Error triggering follow-up ({reason}): {e}")
             session["response_inflight"] = False
             return False
-        url = "https://api.openai.com/v1/audio/transcriptions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-        }
-        data = aiohttp.FormData()
-        data.add_field("file", wav_bytes, filename="wake.wav", content_type="audio/wav")
-        data.add_field("model", model)
-        if language:
-            data.add_field("language", language)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        txt = await resp.text()
-                        log.error(f"Whisper transcription failed: {resp.status} {txt}")
-                        return None
-                    payload = await resp.json()
-                    return payload.get("text")
-        except Exception as e:
-            log.error(f"Error calling Whisper API: {e}")
-            return None
 
     async def _cleanup_session(self, guild_id: int):
         """Clean up session resources."""
