@@ -69,6 +69,10 @@ class RealTalk(red_commands.Cog):
             "wake_recent_seconds": 5,
             "wake_whisper_model": "whisper-1",
             "wake_language": "en",
+            "wake_local": False,
+            "wake_local_model": "base.en",
+            "wake_silence_ms": 400,
+            "wake_activity_threshold": 0.008,
         }
         
         default_guild = {
@@ -584,6 +588,10 @@ class RealTalk(red_commands.Cog):
         wake_recent = await self.config.wake_recent_seconds()
         wake_model = await self.config.wake_whisper_model()
         wake_lang = await self.config.wake_language()
+        wake_local = await self.config.wake_local()
+        wake_local_model = await self.config.wake_local_model()
+        wake_silence = await self.config.wake_silence_ms()
+        wake_sense = await self.config.wake_activity_threshold()
 
         lines = [
             "**RealTalk Settings**",
@@ -600,6 +608,8 @@ class RealTalk(red_commands.Cog):
             f"Wake-word: `{wake_enabled}` (window: {wake_window}ms)",
             f"Wake phrases: {', '.join(wake_words) if wake_words else '(none)'}",
             f"Wake recent window: {wake_recent}s, model: {wake_model}, lang: {wake_lang}",
+            f"Wake local: `{wake_local}` (model: {wake_local_model})",
+            f"Wake silence: {wake_silence}ms, activity thr: {wake_sense}",
             "",
             "System prompt:",
             box(prompt or "(empty)")
@@ -684,6 +694,39 @@ class RealTalk(red_commands.Cog):
             return
         await self.config.wake_words.set(words)
         await ctx.send(f"Wake words set to: {', '.join(words)}. Rejoin voice to apply.")
+
+    @set_group.command(name="wakelocal")
+    async def set_wakelocal(self, ctx: red_commands.Context, enabled: bool):
+        """Use local faster-whisper for wake word (true/false)."""
+        await self.config.wake_local.set(bool(enabled))
+        await ctx.send(f"Wake local transcription {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
+
+    @set_group.command(name="wakesilence")
+    async def set_wakesilence(self, ctx: red_commands.Context, ms: int):
+        """Set wake silence (ms) to mark end-of-speech (100–2000 ms)."""
+        if ms < 100 or ms > 2000:
+            await ctx.send("Invalid value. Choose 100..2000 ms")
+            return
+        await self.config.wake_silence_ms.set(ms)
+        await ctx.send(f"Wake silence set to {ms} ms. Rejoin voice to apply.")
+
+    @set_group.command(name="wakesensitivity")
+    async def set_wakesense(self, ctx: red_commands.Context, value: float):
+        """Set RMS activity threshold (0.0005–0.5). Lower = more sensitive."""
+        if not (0.0005 <= value <= 0.5):
+            await ctx.send("Invalid sensitivity. Use 0.0005..0.5")
+            return
+        await self.config.wake_activity_threshold.set(value)
+        await ctx.send(f"Wake activity threshold set to {value}. Rejoin voice to apply.")
+
+    @set_group.command(name="wakesecs")
+    async def set_wakesecs(self, ctx: red_commands.Context, seconds: int):
+        """Set recent audio window seconds for wake transcription (1–10)."""
+        if seconds < 1 or seconds > 10:
+            await ctx.send("Invalid value. Choose 1..10 seconds")
+            return
+        await self.config.wake_recent_seconds.set(seconds)
+        await ctx.send(f"Wake recent window set to {seconds}s. Rejoin voice to apply.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
@@ -913,16 +956,11 @@ class RealTalk(red_commands.Cog):
                     realtime_client.set_auto_create_response(False)
                 except Exception:
                     pass
-                # Suppress client-side fallback by faking active response state
-                try:
-                    setattr(realtime_client, "_response_active", True)
-                except Exception:
-                    pass
                 # Disable capture-side fallback logic explicitly
                 try:
                     voice_capture.set_fallback_enabled(False)
                     # Set a small activity threshold for speech detection (tunable)
-                    voice_capture.set_activity_threshold(0.008)
+                    voice_capture.set_activity_threshold(await self.config.wake_activity_threshold())
                 except Exception:
                     pass
                 # We will use Whisper for wake detection at speech stop
@@ -1029,12 +1067,6 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
-                    # When wake gating is enabled, suppress fallback by keeping response_active=True when idle
-                    if wake_enabled:
-                        try:
-                            setattr(realtime_client, "_response_active", True)
-                        except Exception:
-                            pass
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
             
@@ -1065,8 +1097,41 @@ class RealTalk(red_commands.Cog):
             await self._cleanup_session(guild_id)
             await ctx.send(f"Failed to start AI session: {e}")
 
-    async def _whisper_transcribe(self, api_key: Optional[str], wav_bytes: bytes, model: str = "whisper-1", language: str = "en") -> Optional[str]:
-        """Call OpenAI Whisper transcription API for wake-word detection."""
+    async def _whisper_transcribe(self, api_key: Optional[str], wav_bytes: bytes, model: str = "whisper-1", language: str = "en", use_local: bool = False, local_model: str = "base.en") -> Optional[str]:
+        """Transcribe audio for wake-word detection.
+
+        If use_local is True and faster-whisper is available, run locally.
+        Otherwise, call OpenAI's Whisper API.
+        """
+        if use_local:
+            try:
+                # Try local faster-whisper
+                from faster_whisper import WhisperModel
+                import numpy as np
+                # Convert WAV to PCM samples (extract data after header)
+                # Minimal WAV parser: find 'data' chunk
+                b = wav_bytes
+                idx = b.find(b"data")
+                if idx == -1 or idx + 8 > len(b):
+                    raise RuntimeError("Invalid WAV data chunk")
+                data_size = int.from_bytes(b[idx+4:idx+8], 'little')
+                pcm = b[idx+8: idx+8+data_size]
+                # 48k mono int16 -> 16k float32
+                a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+                if a.size == 0:
+                    return None
+                # Downsample 48k->16k via 3x decimation (average triads)
+                n = (a.size // 3) * 3
+                a = a[:n].reshape(-1, 3).mean(axis=1)
+                audio16k = (a / 32768.0).astype(np.float32)
+                # Run model
+                model_inst = WhisperModel(local_model, compute_type="int8")
+                segments, info = model_inst.transcribe(audio16k, language=language)
+                text = "".join(seg.text for seg in segments).strip()
+                return text
+            except Exception as e:
+                log.info(f"Local whisper unavailable/fallback: {e}")
+                # fall back to remote
         if not api_key or not wav_bytes:
             return None
         url = "https://api.openai.com/v1/audio/transcriptions"
@@ -1153,11 +1218,13 @@ class RealTalk(red_commands.Cog):
             if not voice_capture or not realtime_client:
                 return
             # Config
-            silence_ms = await self.config.server_vad_silence_ms()
+            silence_ms = await self.config.wake_silence_ms()
             wake_words = [w.lower() for w in (await self.config.wake_words())]
             wake_recent_secs = await self.config.wake_recent_seconds()
             wake_model = await self.config.wake_whisper_model()
             wake_lang = await self.config.wake_language()
+            use_local = await self.config.wake_local()
+            local_model = await self.config.wake_local_model()
             api_key = await self._get_openai_api_key()
             
             speaking = False
@@ -1167,8 +1234,8 @@ class RealTalk(red_commands.Cog):
                 # Determine latest activity time
                 last_any = getattr(voice_capture, 'last_voice_activity_ts', 0.0) or 0.0
                 now = time.time()
-                # Consider speaking if we've seen audio in the last 200ms
-                recently_active = (now - last_any) < 0.2
+                # Consider speaking if we've seen audio in the last 300ms
+                recently_active = (now - last_any) < 0.3
                 # Transition detection
                 if recently_active and not speaking:
                     speaking = True
@@ -1182,31 +1249,16 @@ class RealTalk(red_commands.Cog):
                         wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
                         if not wav:
                             continue
-                        transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang)
+                        transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=use_local, local_model=local_model)
                         t = (transcript or "").lower().strip()
-                        # Only accept wake phrase if found and appears early (within first 60% of text)
-                        match = False
-                        for w in wake_words:
-                            if not w:
-                                continue
-                            idx = t.find(w)
-                            if idx != -1 and idx <= max(5, int(len(t) * 0.6)):
-                                match = True
-                                break
+                        # Accept wake phrase anywhere in the utterance
+                        match = any((w and w in t) for w in wake_words)
                         if match:
-                            # Allow response then trigger
-                            try:
-                                setattr(realtime_client, "_response_active", False)
-                            except Exception:
-                                pass
+                            # Trigger response for this utterance
                             await realtime_client.commit_audio_buffer()
                             await realtime_client.create_response()
                         else:
-                            # Keep fallback suppressed
-                            try:
-                                setattr(realtime_client, "_response_active", True)
-                            except Exception:
-                                pass
+                            pass
                     except Exception as e:
                         log.error(f"Wake watch error: {e}")
                 await asyncio.sleep(0.1)
