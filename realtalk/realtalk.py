@@ -790,36 +790,23 @@ class RealTalk(red_commands.Cog):
 
     @set_group.command(name="wakelocal")
     async def set_wakelocal(self, ctx: red_commands.Context, enabled: bool):
-        """Use local faster-whisper for wake word (true/false)."""
-        await self.config.wake_local.set(bool(enabled))
-        await ctx.send(f"Wake local transcription {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
+        """(Deprecated) Local wake transcription is no longer used."""
+        await ctx.send("Deprecated: Local wake transcription is disabled. Server transcripts are used for gating.")
 
     @set_group.command(name="wakesilence")
     async def set_wakesilence(self, ctx: red_commands.Context, ms: int):
-        """Set wake silence (ms) to mark end-of-speech (100–2000 ms)."""
-        if ms < 100 or ms > 2000:
-            await ctx.send("Invalid value. Choose 100..2000 ms")
-            return
-        await self.config.wake_silence_ms.set(ms)
-        await ctx.send(f"Wake silence set to {ms} ms. Rejoin voice to apply.")
+        """(Deprecated) Local VAD silence is not used with server gating."""
+        await ctx.send("Deprecated: wake silence is not used. Server VAD drives turns.")
 
     @set_group.command(name="wakesensitivity")
     async def set_wakesense(self, ctx: red_commands.Context, value: float):
-        """Set RMS activity threshold (0.0005–0.5). Lower = more sensitive."""
-        if not (0.0005 <= value <= 0.5):
-            await ctx.send("Invalid sensitivity. Use 0.0005..0.5")
-            return
-        await self.config.wake_activity_threshold.set(value)
-        await ctx.send(f"Wake activity threshold set to {value}. Rejoin voice to apply.")
+        """(Deprecated) Local sensitivity is not used."""
+        await ctx.send("Deprecated: local sensitivity is not used. Server transcripts and VAD are used.")
 
     @set_group.command(name="wakesecs")
     async def set_wakesecs(self, ctx: red_commands.Context, seconds: int):
-        """Set recent audio window seconds for wake transcription (1–10)."""
-        if seconds < 1 or seconds > 10:
-            await ctx.send("Invalid value. Choose 1..10 seconds")
-            return
-        await self.config.wake_recent_seconds.set(seconds)
-        await ctx.send(f"Wake recent window set to {seconds}s. Rejoin voice to apply.")
+        """(Deprecated) Recent audio window not used with server gating."""
+        await ctx.send("Deprecated: recent audio window is unused in simplified gating.")
 
     @set_group.command(name="wakefollowup")
     async def set_wakefollowup(self, ctx: red_commands.Context, seconds: int):
@@ -1053,39 +1040,29 @@ class RealTalk(red_commands.Cog):
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
 
-            # Wake-word gating (optional)
+            # Wake-word gating (simplified, server-first)
             wake_enabled = await self.config.wake_word_enabled()
             wake_words = [w.lower() for w in (await self.config.wake_words())]
-            wake_window_ms = await self.config.wake_window_ms()
-            wake_recent_secs = await self.config.wake_recent_seconds()
-            wake_model = await self.config.wake_whisper_model()
-            wake_lang = await self.config.wake_language()
-            wake_local = await self.config.wake_local()
-            wake_local_model = await self.config.wake_local_model()
-            followup_secs = await self.config.wake_followup_seconds()
             fast_followup_after_ai = await self.config.wake_followup_after_ai_secs()
-            wake_state = {"detected": False, "ts": 0.0}
             if wake_enabled:
-                # Suppress auto responses at the server
+                # Use server VAD with auto-create; cancel when transcript lacks wake phrase
                 try:
-                    realtime_client.set_auto_create_response(False)
+                    realtime_client.set_auto_create_response(True)
                 except Exception:
                     pass
-                # Disable capture-side fallback logic explicitly
-                try:
-                    voice_capture.set_fallback_enabled(False)
-                    # Set a small activity threshold for speech detection (tunable)
-                    voice_capture.set_activity_threshold(await self.config.wake_activity_threshold())
-                except Exception:
-                    pass
-                # Also listen for server-side transcripts to catch wake phrases early
+                # Gating: cancel server-created responses unless wake or within fast follow-up
                 def _on_server_transcript(text: str):
                     try:
                         t = (text or "").strip()
                         if not t:
                             return
-                        if self._wake_matches(t, wake_words):
-                            asyncio.create_task(self._maybe_trigger_followup(guild_id, realtime_client, reason="svr-transcript-wake"))
+                        now = time.time()
+                        session = self.sessions.get(guild_id)
+                        fu_until = (session or {}).get("wake_followup_until", 0.0) or 0.0
+                        allowed = (now <= fu_until) or self._wake_matches(t, wake_words)
+                        if not allowed:
+                            asyncio.create_task(realtime_client.cancel_response())
+                            log.debug("Canceled server response (no wake, outside follow-up)")
                     except Exception:
                         pass
                 realtime_client.on_input_transcript = _on_server_transcript
@@ -1157,85 +1134,18 @@ class RealTalk(red_commands.Cog):
             def _on_speech_started():
                 try:
                     nonlocal current_audio_source
-                    session = self.sessions.get(guild_id)
-                    if not session:
-                        return
-                    # Cancel any existing barge task
-                    bt = session.get("barge_task")
-                    if bt:
-                        try:
-                            bt.cancel()
-                        except Exception:
-                            pass
-                    async def _barge_task():
-                        try:
-                            await asyncio.sleep(0.12)
-                            if voice_client and voice_client.is_playing() and getattr(realtime_client, '_response_active', False):
-                                voice_client.stop()
-                                if current_audio_source:
-                                    current_audio_source.interrupt_playback()
-                                session["wake_barge_grace_until"] = time.time() + 3.0
-                                log.debug("Barge-in confirmed; audio stopped and grace window opened")
-                        except asyncio.CancelledError:
-                            return
-                        except Exception as e:
-                            log.error(f"Barge task error: {e}")
-                    task = asyncio.create_task(_barge_task())
-                    session["barge_task"] = task
+                    # Cancel ongoing response and stop playback immediately
+                    asyncio.create_task(realtime_client.cancel_response())
+                    if voice_client and voice_client.is_playing():
+                        voice_client.stop()
+                    if current_audio_source:
+                        current_audio_source.interrupt_playback()
                 except Exception as e:
                     log.error(f"Error handling speech interruption: {e}")
             
             def _on_speech_stopped():
-                # Gate on server VAD too for reliability
-                try:
-                    if not wake_enabled:
-                        return
-                    async def _gate_on_event():
-                        try:
-                            session = self.sessions.get(guild_id)
-                            if not session:
-                                return
-                            # Cancel pending barge debounce if any
-                            bt = session.get("barge_task")
-                            if bt:
-                                try:
-                                    bt.cancel()
-                                except Exception:
-                                    pass
-                            # 1) Barge-in grace window (user spoke over AI)
-                            grace_until = session.get("wake_barge_grace_until", 0.0) or 0.0
-                            if time.time() <= grace_until:
-                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="barge-grace")
-                                log.debug("Follow-up triggered via barge-in grace window")
-                                # Slight extension to allow rapid back-and-forth after barge-in
-                                session["wake_barge_grace_until"] = time.time() + 1.5
-                                return
-                            # 2) Fast follow-up window after AI
-                            fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
-                            if time.time() <= fu_ai_until:
-                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="fast-followup")
-                                session["wake_followup_until"] = time.time() + float(fast_followup_after_ai)
-                                return
-                            # Otherwise transcribe last utterance and check wake words or long follow-up window
-                            seg_secs = max(0.8, min(wake_recent_secs, 4.0))
-                            wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
-                            api_key = await self._get_openai_api_key()
-                            transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=wake_local, local_model=wake_local_model)
-                            t = (transcript or "").strip()
-                            match = self._wake_matches(t, wake_words)
-                            now_ts = time.time()
-                            fu_expires = session.get("wake_followup_expires", 0.0)
-                            if match:
-                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="wake-match")
-                                session["wake_followup_expires"] = now_ts + float(followup_secs)
-                            elif now_ts <= fu_expires:
-                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="long-followup")
-                                session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
-                        except Exception:
-                            pass
-                    asyncio.create_task(_gate_on_event())
-                except Exception:
-                    pass
+                # Rely solely on server transcript gating
+                return
             
             # Reset playback state on response boundaries
             def _on_resp_start():
@@ -1304,17 +1214,9 @@ class RealTalk(red_commands.Cog):
             monitor_task = asyncio.create_task(self._monitor_session(guild_id, idle_timeout))
             self.sessions[guild_id]["monitor_task"] = monitor_task
             
-            # If wake gating is enabled, start a local watcher to detect end-of-speech and trigger Whisper gate
+            # Initialize simplified follow-up state
             if wake_enabled:
-                # Initialize follow-up state
-                self.sessions[guild_id]["wake_followup_user"] = None
-                self.sessions[guild_id]["wake_followup_expires"] = 0.0
-                self.sessions[guild_id]["wake_barge_grace_until"] = 0.0
-                self.sessions[guild_id]["gate_next_allowed"] = 0.0
-                self.sessions[guild_id]["response_inflight"] = False
-                self.sessions[guild_id]["barge_task"] = None
-                wake_task = asyncio.create_task(self._wake_watch(guild_id))
-                self.sessions[guild_id]["wake_task"] = wake_task
+                self.sessions[guild_id]["wake_followup_until"] = 0.0
             
             log.info(f"Started AI conversation session for guild {guild_id}")
             
