@@ -197,6 +197,29 @@ class RealtimeClient:
         except Exception as e:
             log.error(f"Error queuing audio data: {e}")
 
+    async def send_text_message(self, text: str):
+        """Send a text message to the conversation."""
+        if not self.connected or not self.session_active or not text.strip():
+            return
+            
+        try:
+            await self._send_message({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message", 
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": text
+                        }
+                    ]
+                }
+            })
+            log.debug(f"Sent text message: {text}")
+        except Exception as e:
+            log.error(f"Error sending text message: {e}")
+
     async def _audio_streaming_task(self):
         """Background task for streaming audio data."""
         while self.connected:

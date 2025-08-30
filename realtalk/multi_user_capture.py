@@ -152,8 +152,17 @@ class UserAudioProcessor:
                     log.debug(f"User {self.display_name} stopped speaking "
                              f"(duration: {speech_duration:.1f}s, buffer: {len(self.audio_buffer)} bytes)")
                     
-                    # Commit audio buffer to get transcript
-                    await self.realtime_client.commit_audio_buffer()
+                    # Commit audio buffer to get transcript (only if we have sufficient audio)
+                    if len(self.audio_buffer) > 0:
+                        # Check if we have enough audio (at least 100ms at 48kHz, 16-bit = ~9600 bytes)
+                        min_audio_bytes = int(0.1 * self.sample_rate * 2)  # 100ms at 48kHz, 16-bit
+                        if len(self.audio_buffer) >= min_audio_bytes:
+                            await self.realtime_client.commit_audio_buffer()
+                        else:
+                            log.debug(f"Skipping commit - insufficient audio: {len(self.audio_buffer)} bytes "
+                                    f"(need {min_audio_bytes})")
+                    else:
+                        log.debug("Skipping commit - empty audio buffer")
                     
         except Exception as e:
             log.error(f"Error processing audio for {self.display_name}: {e}")
@@ -216,6 +225,8 @@ class UserAudioProcessor:
             
             # Handle routing decision
             if decision["action"] == "speak":
+                # Add turn to decision for response generation
+                decision["turn"] = turn
                 # Trigger bot response through main realtime client
                 asyncio.create_task(self._trigger_bot_response(decision))
             
@@ -225,14 +236,22 @@ class UserAudioProcessor:
     async def _trigger_bot_response(self, decision: dict):
         """Trigger bot response through main realtime client"""
         try:
-            # Bot responses go through the main realtime client to prevent conflicts
-            await self.main_realtime_client.commit_audio_buffer()
+            # Get the transcript text from the decision
+            turn = decision.get('turn')
+            if not turn or not turn.text:
+                log.warning("No transcript text available for bot response")
+                return
+            
+            # Send the transcript as a text message to the main realtime client
+            await self.main_realtime_client.send_text_message(turn.text)
+            
+            # Create response from the text input
             await self.main_realtime_client.create_response()
             
             thread_id = decision.get('thread_id')
             if thread_id:
                 log.info(f"Triggered bot response for thread {thread_id} "
-                        f"(reason: {decision.get('reason')})")
+                        f"(reason: {decision.get('reason')}) with text: '{turn.text}'")
             
         except Exception as e:
             log.error(f"Error triggering bot response: {e}")
