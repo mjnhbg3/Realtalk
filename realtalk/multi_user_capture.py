@@ -458,12 +458,45 @@ class UserAudioSink(AudioSink):
             self.users_seen.add(str(user.id))
             
             # Extract PCM data from voice data
-            if hasattr(data, 'packet'):
-                audio_data = data.packet
-            elif hasattr(data, 'pcm'):
+            audio_data = None
+            
+            # Debug: log data structure first time
+            if self.total_packets == 1:
+                log.debug(f"Audio data structure: type={type(data)}, attrs={[attr for attr in dir(data) if not attr.startswith('_')]}")
+                if hasattr(data, 'packet'):
+                    packet = data.packet
+                    log.debug(f"Packet type={type(packet)}, attrs={[attr for attr in dir(packet) if not attr.startswith('_')]}")
+            
+            if hasattr(data, 'pcm') and data.pcm:
+                # Direct PCM data
                 audio_data = data.pcm
+            elif hasattr(data, 'packet'):
+                # RTPPacket object - extract payload
+                packet = data.packet
+                if hasattr(packet, 'payload'):
+                    audio_data = packet.payload
+                elif hasattr(packet, 'data'):
+                    audio_data = packet.data
+                elif hasattr(packet, 'pcm'):
+                    audio_data = packet.pcm
+                else:
+                    # Try to convert packet directly
+                    try:
+                        audio_data = bytes(packet)
+                    except (TypeError, ValueError):
+                        log.warning(f"Unable to convert RTPPacket {type(packet)} to bytes")
+                        return
             else:
-                audio_data = bytes(data)
+                # Fallback - try direct conversion
+                try:
+                    audio_data = bytes(data)
+                except (TypeError, ValueError):
+                    log.warning(f"Unable to extract audio data from {type(data)}")
+                    return
+            
+            if not audio_data:
+                log.warning("No audio data extracted")
+                return
             
             # Forward to voice capture (async) - thread-safe scheduling
             main_loop = self.voice_capture.main_loop
