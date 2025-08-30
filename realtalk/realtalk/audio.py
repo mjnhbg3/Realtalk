@@ -256,6 +256,31 @@ class PCMQueueAudioSource(discord.AudioSource):
         except Exception as e:
             log.error(f"Error adding audio to queue: {e}")
 
+    def put_48k_stereo_frame(self, frame: bytes):
+        """Directly enqueue a single 20ms 48kHz stereo PCM16 frame (3840 bytes)."""
+        try:
+            if not frame:
+                return
+            frame_bytes = self.frame_size * self.channels * 2
+            # Normalize frame length: pad or truncate as needed to exactly one frame
+            if len(frame) < frame_bytes:
+                frame = frame + b"\x00" * (frame_bytes - len(frame))
+            elif len(frame) > frame_bytes:
+                frame = frame[:frame_bytes]
+
+            with self.queue_lock:
+                if len(self.audio_queue) >= self.max_queue_size:
+                    # Remove oldest frame to make room for new one
+                    old_frame = self.audio_queue.popleft()
+                    self.frames_dropped += 1
+
+                self.audio_queue.append(frame)
+                self.frames_queued += 1
+                self.has_real_audio = True
+                    
+        except Exception as e:
+            log.error(f"Error adding 48k stereo frame to queue: {e}")
+
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
         """Convert OpenAI PCM16 to 48kHz stereo.
         

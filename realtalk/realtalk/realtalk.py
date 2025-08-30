@@ -21,6 +21,7 @@ from .realtime import RealtimeClient
 from .router import ConversationRouter, Turn
 from .capture import VoiceCapture
 from .audio import PCMQueueAudioSource, load_opus_lib
+from .audio_ratelimited import RateLimitedAudioSource
 
 log = logging.getLogger("red.realtalk")
 
@@ -836,25 +837,46 @@ class RealTalk(red_commands.Cog):
                     
                     # Create fresh audio source if needed (new response)
                     if current_audio_source is None:
-                        # Try using PCMQueueAudioSource for now (simplified from working RateLimitedAudioSource)
-                        current_audio_source = PCMQueueAudioSource(
-                            sample_rate=48000,
+                        # Use rate-limited audio source to prevent Discord timing compensation (like working version)
+                        current_audio_source = RateLimitedAudioSource(
+                            target_sample_rate=48000,
                             channels=2, 
                             frame_size=960,
-                            max_queue_size=10  # Smaller queue like working version
+                            rate_limit_enabled=True,  # Enable rate limiting to prevent stuttering
+                            target_buffer_ms=200
                         )
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
-                        log.debug("Created fresh audio source for new response")
+                        log.debug(f"Created fresh rate-limited audio source (rate_limit=True, buffer_target=200ms)")
+                        
+                        # Start pacing immediately for rate limiting to work properly
+                        try:
+                            if hasattr(current_audio_source, 'start_pacing'):
+                                current_audio_source.start_pacing()
+                                log.debug("Started audio pacing for rate limiting")
+                        except Exception as e:
+                            log.error(f"Error starting pacing: {e}")
                     
                     # Always queue audio data first
                     current_audio_source.put_audio(audio_data)
                     
-                    # Start playback only when we have adequate buffer to prevent timing compensation
-                    # Use the AudioSource's ready_for_playback property (4+ frames = 80ms minimum)
-                    if (voice_client and not voice_client.is_playing() and 
-                        current_audio_source.ready_for_playback):
+                    # Start playback when we have adequate buffer to prevent timing compensation
+                    # Check both pacing and PCM buffers for rate-limited source
+                    pacing_frames = getattr(current_audio_source, 'pacing_queue_size', 0) if hasattr(current_audio_source, 'pacing_queue_size') else 0
+                    pacing_ms = pacing_frames * 20
+                    target_buffer_ms = getattr(current_audio_source, 'target_buffer_ms', 200)
+                    
+                    if (voice_client and not voice_client.is_playing() and (
+                        current_audio_source.ready_for_playback or pacing_ms >= target_buffer_ms
+                    )):
+                        
+                        # Start Discord playback
                         voice_client.play(current_audio_source, after=_audio_finished)
-                        log.debug(f"Started Discord audio playback with {current_audio_source.queue_size} frames buffered")
+                        
+                        # Log comprehensive buffer status
+                        total_buffer = getattr(current_audio_source, 'total_queue_size', current_audio_source.queue_size) if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
+                        rate_limiting_enabled = getattr(current_audio_source, 'rate_limit_enabled', False)
+                        log.debug(f"Started Discord audio playback with {total_buffer} frames buffered "
+                                f"(rate_limiting={rate_limiting_enabled})")
                             
                 except Exception as e:
                     log.error(f"Error in audio output handler: {e}")
