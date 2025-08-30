@@ -22,6 +22,8 @@ from redbot.core.utils.chat_formatting import box, humanize_list
 from .realtime import RealtimeClient
 from .capture import VoiceCapture
 from .audio import PCMQueueAudioSource, RateLimitedAudioSource, load_opus_lib
+from .router import ConversationRouter, Turn
+from .multi_user_capture import MultiUserVoiceCapture
 
 log = logging.getLogger("red.realtalk")
 
@@ -63,21 +65,15 @@ class RealTalk(red_commands.Cog):
             # Audio rate control settings to prevent Discord timing compensation
             "audio_rate_limiting": False,  # DISABLED FOR TESTING - Enable rate-limited audio delivery
             "audio_buffer_target_ms": 200,  # Target buffer size for pacing (ms)
-            # Wake-word gate (optional)
-            "wake_word_enabled": False,
-            # Include spaced variants to improve matching out-of-the-box
-            "wake_words": ["hey dukebot", "dukebot", "hey duke bot", "duke bot"],
-            "wake_window_ms": 6000,
-            "wake_recent_seconds": 5,
-            "wake_whisper_model": "whisper-1",
-            "wake_language": "en",
-            "wake_local": False,
-            "wake_local_model": "base.en",
-            "wake_silence_ms": 400,
-            # Slightly more sensitive default for local VAD
-            "wake_activity_threshold": 0.004,
-            "wake_followup_seconds": 12,
-            "wake_followup_after_ai_secs": 4,
+            # Conversation routing configuration
+            "router_enabled": True,
+            "addr_threshold": 0.55,
+            "followup_threshold": 0.45, 
+            "margin_threshold": 0.2,
+            "thread_timeout": 60,
+            "expects_reply_timeout": 8,
+            # Bot aliases for addressing detection
+            "bot_aliases": ["dukebot", "duke bot", "duke", "bot", "ai", "assistant"],
         }
         
         default_guild = {
@@ -94,6 +90,9 @@ class RealTalk(red_commands.Cog):
         # Voice connection retry state
         self.retry_state: Dict[int, Dict[str, Any]] = {}
         
+        # Conversation routers per guild
+        self.routers: Dict[int, ConversationRouter] = {}
+        
         # Version identifier for enhanced cog
         self.__version__ = "2.0.0-enhanced"
 
@@ -101,6 +100,8 @@ class RealTalk(red_commands.Cog):
         """Clean up when cog is unloaded."""
         for guild_id in list(self.sessions.keys()):
             await self._cleanup_session(guild_id)
+        # Clear routers
+        self.routers.clear()
 
     @red_commands.group(name="realtalk", aliases=["rt"])
     async def realtalk(self, ctx: red_commands.Context):
@@ -361,9 +362,9 @@ class RealTalk(red_commands.Cog):
         """Debug toggles for RealTalk."""
         pass
 
-    @debug_group.command(name="wake")
-    async def debug_wake_toggle(self, ctx: red_commands.Context, state: str, seconds: Optional[int] = 60):
-        """Toggle wake debug breadcrumbs in this guild (on/off) with optional TTL seconds (default 60)."""
+    @debug_group.command(name="router")
+    async def debug_router_toggle(self, ctx: red_commands.Context, state: str):
+        """Toggle router debug output (on/off)."""
         guild_id = ctx.guild.id
         session = self.sessions.get(guild_id)
         if not session:
@@ -371,16 +372,57 @@ class RealTalk(red_commands.Cog):
             return
         s = state.strip().lower()
         if s not in {"on","off","true","false","enable","disable"}:
-            await ctx.send("Usage: [p]realtalk debug wake on|off [seconds]")
+            await ctx.send("Usage: [p]realtalk debug router on|off")
             return
         if s in {"on","true","enable"}:
-            ttl = max(5, int(seconds or 60))
-            session["wake_debug_until"] = time.time() + ttl
-            session["wake_debug_last_ts"] = 0.0
-            await ctx.send(f"Wake debug enabled for {ttl}s.")
+            session["router_debug"] = True
+            await ctx.send("Router debug enabled.")
         else:
-            session["wake_debug_until"] = 0.0
-            await ctx.send("Wake debug disabled.")
+            session["router_debug"] = False
+            await ctx.send("Router debug disabled.")
+    
+    @debug_group.command(name="users")
+    async def debug_users(self, ctx: red_commands.Context):
+        """Show per-user processing statistics."""
+        guild_id = ctx.guild.id
+        session = self.sessions.get(guild_id)
+        if not session:
+            await ctx.send("No active session in this guild.")
+            return
+        
+        voice_capture = session.get("voice_capture")
+        if not isinstance(voice_capture, MultiUserVoiceCapture):
+            await ctx.send("Multi-user capture not active.")
+            return
+        
+        stats = voice_capture.get_stats()
+        
+        lines = [
+            "**Per-User Processing Stats**",
+            f"Uptime: {stats['uptime_seconds']:.1f}s",
+            f"Active users: {stats['active_users']}",
+            f"Total users processed: {stats['total_users_processed']}",
+            f"Active speakers: {', '.join(stats['active_speakers']) if stats['active_speakers'] else 'none'}",
+            ""
+        ]
+        
+        if stats['user_processors']:
+            lines.append("**User Details:**")
+            for user_id, user_stats in stats['user_processors'].items():
+                name = user_stats['display_name']
+                speaking = "🗣️" if user_stats['is_speaking'] else "🔇"
+                connected = "✅" if user_stats['connected'] else "❌"
+                last_transcript = user_stats['last_transcript_seconds_ago']
+                last_str = f"{last_transcript:.1f}s ago" if last_transcript >= 0 else "never"
+                
+                lines.append(
+                    f"{speaking} **{name}** {connected} - "
+                    f"Segments: {user_stats['speech_segments']}, "
+                    f"Chunks: {user_stats['total_audio_chunks']}, "
+                    f"Last transcript: {last_str}"
+                )
+        
+        await ctx.send("\n".join(lines))
 
     @sinks_command.command(name="status")
     async def sinks_status(self, ctx: red_commands.Context):
@@ -611,16 +653,18 @@ class RealTalk(red_commands.Cog):
         idle = await self.config.idle_timeout()
         rate_limiting = await self.config.audio_rate_limiting()
         buffer_target = await self.config.audio_buffer_target_ms()
-        wake_enabled = await self.config.wake_word_enabled()
-        wake_words = await self.config.wake_words()
-        fast_follow_after = await self.config.wake_followup_after_ai_secs()
+        router_enabled = await self.config.router_enabled()
+        bot_aliases = await self.config.bot_aliases()
+        addr_threshold = await self.config.addr_threshold()
+        followup_threshold = await self.config.followup_threshold()
+        margin_threshold = await self.config.margin_threshold()
         # Runtime debug status (ephemeral)
         guild_id = ctx.guild.id
         session = self.sessions.get(guild_id)
         now = time.time()
-        wake_debug_active = False
+        router_debug_active = False
         if session:
-            wake_debug_active = (session.get("wake_debug_until", 0.0) or 0.0) > now
+            router_debug_active = session.get("router_debug", False)
 
         lines = [
             "**RealTalk Settings**",
@@ -632,51 +676,37 @@ class RealTalk(red_commands.Cog):
             f"Mix multiple speakers: `{mix}`",
             f"Idle timeout: `{idle}` seconds",
             f"Audio rate limiting: `{rate_limiting}` (buffer: {buffer_target}ms)",
-            f"Wake gating: `{wake_enabled}` (fast follow-up: {fast_follow_after}s)",
-            f"Wake phrases: {', '.join(wake_words) if wake_words else '(none)'}",
-            f"Wake debug: `{wake_debug_active}`",
+            f"Router enabled: `{router_enabled}`",
+            f"Bot aliases: {', '.join(bot_aliases)}",
+            f"Thresholds: addr={addr_threshold}, followup={followup_threshold}, margin={margin_threshold}",
+            f"Router debug: `{router_debug_active}`,
             "",
             "System prompt:",
             box(prompt or "(empty)")
         ]
         await ctx.send("\n".join(lines))
 
-    # --- Wake debug helper ---
-    def _debug_wake(self, guild_id: int, message: str):
+    # --- Router debug helper ---
+    async def _send_router_debug(self, ctx: red_commands.Context, decision: Dict[str, Any], transcript: str):
+        """Send router debug information to the channel."""
         try:
-            session = self.sessions.get(guild_id)
-            if not session:
-                return
-            now = time.time()
-            until = session.get("wake_debug_until", 0.0) or 0.0
-            if now > until:
-                return
-            last = session.get("wake_debug_last_ts", 0.0) or 0.0
-            if (now - last) < 0.5:
-                return
-            session["wake_debug_last_ts"] = now
-            ctx = session.get("context")
+            action = decision['action']
+            reason = decision.get('reason', 'unknown')
+            score = decision.get('score', 0)
+            
+            debug_msg = f"[router-debug] '{transcript[:50]}{'...' if len(transcript) > 50 else ''}' → **{action.upper()}** ({reason}, score={score:.2f})"
+            
+            # Add feature info if available
+            features = decision.get('features', {})
+            if features:
+                feature_summary = ", ".join([f"{k}={v:.1f}" for k, v in features.items() if v > 0.1][:3])
+                if feature_summary:
+                    debug_msg += f" [features: {feature_summary}]"
+            
             if ctx and ctx.channel:
-                # Fire and forget; don't block audio threads
-                asyncio.create_task(ctx.send(f"[wake-debug] {message}"))
-        except Exception:
-            pass
-
-    # --- Wake phrase matching helper ---
-    def _normalize_text(self, s: str) -> str:
-        try:
-            return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
-        except Exception:
-            return (s or "").lower().replace(" ", "")
-
-    def _wake_matches(self, text: str, phrases: List[str]) -> bool:
-        norm_t = self._normalize_text(text)
-        for p in phrases or []:
-            if not p:
-                continue
-            if self._normalize_text(p) in norm_t:
-                return True
-        return False
+                await ctx.send(debug_msg)
+        except Exception as e:
+            log.error(f"Error sending router debug: {e}")
 
     @show_group.command(name="wake")
     async def show_wake(self, ctx: red_commands.Context):
@@ -807,59 +837,54 @@ class RealTalk(red_commands.Cog):
         await self.config.idle_timeout.set(seconds)
         await ctx.send(f"Idle timeout set to {seconds}s. Rejoin voice to apply.")
 
-    @set_group.command(name="wake")
-    async def set_wake(self, ctx: red_commands.Context, enabled: bool):
-        """Enable or disable wake-word gating (true/false)."""
-        await self.config.wake_word_enabled.set(bool(enabled))
-        await ctx.send(f"Wake-word gating {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
+    @set_group.command(name="router")
+    async def set_router(self, ctx: red_commands.Context, enabled: bool):
+        """Enable or disable conversation routing (true/false)."""
+        await self.config.router_enabled.set(bool(enabled))
+        await ctx.send(f"Conversation routing {'enabled' if enabled else 'disabled'}. Rejoin voice to apply.")
 
-    @set_group.command(name="wakewords")
-    async def set_wakewords(self, ctx: red_commands.Context, *, phrases: str):
-        """Set wake words, comma-separated (e.g., 'hey dukebot, dukebot')."""
-        words = [w.strip().lower() for w in phrases.split(',') if w.strip()]
-        if not words:
-            await ctx.send("Please provide at least one wake phrase.")
+    @set_group.command(name="aliases")
+    async def set_aliases(self, ctx: red_commands.Context, *, phrases: str):
+        """Set bot aliases, comma-separated (e.g., 'dukebot, duke, bot')."""
+        aliases = [w.strip().lower() for w in phrases.split(',') if w.strip()]
+        if not aliases:
+            await ctx.send("Please provide at least one bot alias.")
             return
-        await self.config.wake_words.set(words)
-        await ctx.send(f"Wake words set to: {', '.join(words)}. Rejoin voice to apply.")
+        await self.config.bot_aliases.set(aliases)
+        await ctx.send(f"Bot aliases set to: {', '.join(aliases)}. Rejoin voice to apply.")
 
-    @set_group.command(name="wakelocal")
-    async def set_wakelocal(self, ctx: red_commands.Context, enabled: bool):
-        """(Deprecated) Local wake transcription is no longer used."""
-        await ctx.send("Deprecated: Local wake transcription is disabled. Server transcripts are used for gating.")
-
-    @set_group.command(name="wakesilence")
-    async def set_wakesilence(self, ctx: red_commands.Context, ms: int):
-        """(Deprecated) Local VAD silence is not used with server gating."""
-        await ctx.send("Deprecated: wake silence is not used. Server VAD drives turns.")
-
-    @set_group.command(name="wakesensitivity")
-    async def set_wakesense(self, ctx: red_commands.Context, value: float):
-        """(Deprecated) Local sensitivity is not used."""
-        await ctx.send("Deprecated: local sensitivity is not used. Server transcripts and VAD are used.")
-
-    @set_group.command(name="wakesecs")
-    async def set_wakesecs(self, ctx: red_commands.Context, seconds: int):
-        """(Deprecated) Recent audio window not used with server gating."""
-        await ctx.send("Deprecated: recent audio window is unused in simplified gating.")
-
-    @set_group.command(name="wakefollowup")
-    async def set_wakefollowup(self, ctx: red_commands.Context, seconds: int):
-        """Set follow-up window seconds after a wake-verified utterance (0–60)."""
-        if seconds < 0 or seconds > 60:
-            await ctx.send("Invalid value. Choose 0..60 seconds")
+    @set_group.command(name="thresholds")
+    async def set_thresholds(self, ctx: red_commands.Context, addr: float, followup: float, margin: float = None):
+        """Set routing thresholds (addr, followup, margin)."""
+        if not (0.0 <= addr <= 1.0) or not (0.0 <= followup <= 1.0):
+            await ctx.send("Thresholds must be between 0.0 and 1.0")
             return
-        await self.config.wake_followup_seconds.set(seconds)
-        await ctx.send(f"Wake follow-up window set to {seconds}s. Rejoin voice to apply.")
+        await self.config.addr_threshold.set(addr)
+        await self.config.followup_threshold.set(followup)
+        if margin is not None:
+            if not (0.0 <= margin <= 1.0):
+                await ctx.send("Margin threshold must be between 0.0 and 1.0")
+                return
+            await self.config.margin_threshold.set(margin)
+        await ctx.send(f"Thresholds updated: addr={addr}, followup={followup}" + (f", margin={margin}" if margin else ""))
 
-    @set_group.command(name="wakefollowupafterai")
-    async def set_wakefollowup_after_ai(self, ctx: red_commands.Context, seconds: int):
-        """Set fast follow-up window after AI finishes (0–10 seconds)."""
-        if seconds < 0 or seconds > 10:
-            await ctx.send("Invalid value. Choose 0..10 seconds")
+    @set_group.command(name="threadtimeout")
+    async def set_thread_timeout(self, ctx: red_commands.Context, seconds: int):
+        """Set how long threads stay active without activity (10-300 seconds)."""
+        if seconds < 10 or seconds > 300:
+            await ctx.send("Invalid value. Choose 10-300 seconds")
             return
-        await self.config.wake_followup_after_ai_secs.set(seconds)
-        await ctx.send(f"Fast follow-up after AI set to {seconds}s. Rejoin voice to apply.")
+        await self.config.thread_timeout.set(seconds)
+        await ctx.send(f"Thread timeout set to {seconds}s. Active immediately.")
+
+    @set_group.command(name="replytimeout")
+    async def set_reply_timeout(self, ctx: red_commands.Context, seconds: int):
+        """Set how long bot waits for expected replies (3-30 seconds)."""
+        if seconds < 3 or seconds > 30:
+            await ctx.send("Invalid value. Choose 3-30 seconds")
+            return
+        await self.config.expects_reply_timeout.set(seconds)
+        await ctx.send(f"Reply expectation timeout set to {seconds}s. Active immediately.")
 
     async def _check_setup(self, ctx: red_commands.Context) -> bool:
         """Check if RealTalk is properly set up."""
@@ -1039,25 +1064,23 @@ class RealTalk(red_commands.Cog):
                 instructions=await self.config.system_prompt(),
             )
             
-            # Initialize voice capture with minimal local processing
-            voice_capture = VoiceCapture(
+            # Initialize multi-user voice capture system
+            realtime_config = {
+                'api_key': api_key,
+                'model': model_name,
+                'voice': voice_name,
+                'transcribe': transcribe_model,
+                'server_vad': server_vad,
+            }
+            
+            voice_capture = MultiUserVoiceCapture(
                 voice_client=voice_client,
-                realtime_client=realtime_client,
-                audio_threshold=0.0,  # Disabled - let OpenAI handle voice detection
-                silence_threshold=100  # Minimal local buffering
+                router=router,
+                realtime_config=realtime_config,
+                main_realtime_client=realtime_client
             )
-            # Disable local audio processing - let OpenAI handle everything
-            try:
-                # Always disable noise gate - OpenAI has better noise reduction
-                voice_capture.set_noise_gate(False)
-                log.info("Local noise processing disabled - OpenAI will handle audio filtering")
-            except Exception:
-                pass
-            try:
-                mix_enabled = await self.config.mix_multiple()
-                voice_capture.set_speaker_mixing(bool(mix_enabled))
-            except Exception:
-                pass
+            
+            log.info("Initialized multi-user voice capture with per-speaker processing")
             
             # Initialize current audio source reference (will be created fresh per response)
             current_audio_source = None
@@ -1075,37 +1098,36 @@ class RealTalk(red_commands.Cog):
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
 
-            # Wake-word gating (simplified, server-first)
-            wake_enabled = await self.config.wake_word_enabled()
-            wake_words = [w.lower() for w in (await self.config.wake_words())]
-            fast_followup_after_ai = await self.config.wake_followup_after_ai_secs()
-            if wake_enabled:
-                # Use server VAD with auto-create; cancel when transcript lacks wake phrase
+            # Conversation routing system
+            router_enabled = await self.config.router_enabled()
+            if router_enabled:
+                # Initialize conversation router for this guild
+                if guild_id not in self.routers:
+                    self.routers[guild_id] = ConversationRouter(main_realtime_client=realtime_client)
+                
+                router = self.routers[guild_id]
+                
+                # Update router configuration
+                router.update_thresholds(
+                    addr_threshold=await self.config.addr_threshold(),
+                    followup_threshold=await self.config.followup_threshold(),
+                    margin_threshold=await self.config.margin_threshold()
+                )
+                
+                # Set bot aliases for addressing detection
+                bot_aliases = await self.config.bot_aliases()
+                router.feature_extractor.bot_aliases = bot_aliases
+                
+                # Configure realtime client for routing
                 try:
-                    realtime_client.set_auto_create_response(True)
+                    # Main client handles bot responses only, not transcription
+                    realtime_client.set_auto_create_response(False)
                 except Exception:
                     pass
-                # Gating: cancel server-created responses unless wake or within fast follow-up
-                def _on_server_transcript(text: str):
-                    try:
-                        t = (text or "").strip()
-                        if not t:
-                            return
-                        now = time.time()
-                        session = self.sessions.get(guild_id)
-                        fu_until = (session or {}).get("wake_followup_until", 0.0) or 0.0
-                        is_wake = self._wake_matches(t, wake_words)
-                        allowed = (now <= fu_until) or is_wake
-                        if not allowed:
-                            asyncio.create_task(realtime_client.cancel_response())
-                            log.debug("Canceled server response (no wake, outside follow-up)")
-                            self._debug_wake(guild_id, "cancel: no wake, outside follow-up")
-                        else:
-                            reason = "wake" if is_wake else "fast-followup"
-                            self._debug_wake(guild_id, f"allow: {reason}")
-                    except Exception:
-                        pass
-                realtime_client.on_input_transcript = _on_server_transcript
+                
+                # Transcript handling is now done by individual user processors
+                # in the MultiUserVoiceCapture system - no need for central handler
+                log.info("Routing enabled - transcripts handled by per-user processors")
             
             # Audio playback completion callback
             def _audio_finished(error):
@@ -1211,27 +1233,30 @@ class RealTalk(red_commands.Cog):
                         current_audio_source.finish_stream()
                         total_queue = current_audio_source.total_queue_size if hasattr(current_audio_source, 'total_queue_size') else current_audio_source.queue_size
                         log.debug(f"Response completed - marked stream for completion ({total_queue} frames remaining)")
-                    # Open a short follow-up window after AI speaks
-                    if wake_enabled and guild_id in self.sessions:
-                        nowt = time.time()
-                        self.sessions[guild_id]["wake_followup_until"] = nowt + float(fast_followup_after_ai)
-                        # IMPORTANT: require wake again after this fast window; clear any prior long window
-                        self.sessions[guild_id]["wake_followup_expires"] = 0.0
-                        log.debug(f"Follow-up window after AI opened for {fast_followup_after_ai}s")
-                        self._debug_wake(guild_id, f"fast-followup window opened: {fast_followup_after_ai}s")
+                    # Update router state after bot response
+                    if router_enabled and guild_id in self.routers:
+                        router = self.routers[guild_id]
+                        # Find active thread for this response (simplified - use most recent)
+                        if router.threads:
+                            latest_thread = max(router.threads, key=lambda t: t.last_activity)
+                            # Classify the bot's response to set expectations
+                            question_type = router.classify_bot_question("")
+                            router.on_bot_reply(latest_thread.id, "", question_type)
+                            log.debug(f"Updated router state after bot response")
                 except Exception as e:
                     log.error(f"Error finishing stream: {e}")
 
             # Fallback: if server doesn't emit audio.done reliably, still open follow-up on response.done
             def _on_resp_done_minimal():
                 try:
-                    if wake_enabled and guild_id in self.sessions:
-                        nowt = time.time()
-                        self.sessions[guild_id]["wake_followup_until"] = nowt + float(fast_followup_after_ai)
-                        # Clear any long follow-up window when a new AI turn ends
-                        self.sessions[guild_id]["wake_followup_expires"] = 0.0
-                        log.debug(f"(Fallback) Follow-up window after response.done opened for {fast_followup_after_ai}s")
-                        self._debug_wake(guild_id, f"fast-followup window opened (fallback): {fast_followup_after_ai}s")
+                    # Update router state after bot response (fallback)
+                    if router_enabled and guild_id in self.routers:
+                        router = self.routers[guild_id]
+                        if router.threads:
+                            latest_thread = max(router.threads, key=lambda t: t.last_activity)
+                            question_type = router.classify_bot_question("")
+                            router.on_bot_reply(latest_thread.id, "", question_type)
+                            log.debug(f"(Fallback) Updated router state after response.done")
                     # Also ensure we finish the audio stream if audio.done wasn't seen
                     nonlocal current_audio_source
                     if current_audio_source:
@@ -1257,9 +1282,9 @@ class RealTalk(red_commands.Cog):
             monitor_task = asyncio.create_task(self._monitor_session(guild_id, idle_timeout))
             self.sessions[guild_id]["monitor_task"] = monitor_task
             
-            # Initialize simplified follow-up state
-            if wake_enabled:
-                self.sessions[guild_id]["wake_followup_until"] = 0.0
+            # Store router debug state
+            if router_enabled:
+                self.sessions[guild_id]["router_debug"] = False
             
             log.info(f"Started AI conversation session for guild {guild_id}")
             
@@ -1268,100 +1293,6 @@ class RealTalk(red_commands.Cog):
             await self._cleanup_session(guild_id)
             await ctx.send(f"Failed to start AI session: {e}")
 
-    async def _whisper_transcribe(self, api_key: Optional[str], wav_bytes: bytes, model: str = "whisper-1", language: str = "en", use_local: bool = False, local_model: str = "base.en") -> Optional[str]:
-        """Transcribe audio for wake-word detection.
-
-        If use_local is True and faster-whisper is available, run locally.
-        Otherwise, call OpenAI's Whisper API.
-        """
-        # Prefer local faster-whisper if enabled
-        if use_local:
-            try:
-                from faster_whisper import WhisperModel
-                import numpy as np
-                b = wav_bytes or b""
-                idx = b.find(b"data")
-                if idx == -1 or idx + 8 > len(b):
-                    raise RuntimeError("Invalid WAV data chunk")
-                data_size = int.from_bytes(b[idx+4:idx+8], 'little')
-                pcm = b[idx+8: idx+8+data_size]
-                a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-                if a.size == 0:
-                    return None
-                n = (a.size // 3) * 3
-                a = a[:n].reshape(-1, 3).mean(axis=1)
-                audio16k = (a / 32768.0).astype(np.float32)
-                model_inst = WhisperModel(local_model, compute_type="int8")
-                segments, info = model_inst.transcribe(audio16k, language=language)
-                return "".join(seg.text for seg in segments).strip()
-            except Exception as e:
-                log.info(f"Local whisper unavailable/fallback: {e}")
-
-        # Remote Whisper API fallback
-        if not api_key or not wav_bytes:
-            return None
-        url = "https://api.openai.com/v1/audio/transcriptions"
-        headers = {"Authorization": f"Bearer {api_key}"}
-        data = aiohttp.FormData()
-        data.add_field("file", wav_bytes, filename="wake.wav", content_type="audio/wav")
-        data.add_field("model", model)
-        if language:
-            data.add_field("language", language)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                    if resp.status != 200:
-                        txt = await resp.text()
-                        log.error(f"Whisper transcription failed: {resp.status} {txt}")
-                        return None
-                    payload = await resp.json()
-                    return payload.get("text")
-        except Exception as e:
-            log.error(f"Error calling Whisper API: {e}")
-            return None
-
-    async def _clear_inflight_after(self, guild_id: int, delay: float = 5.0):
-        try:
-            await asyncio.sleep(delay)
-            session = self.sessions.get(guild_id)
-            if session:
-                session["response_inflight"] = False
-                log.debug(f"Inflight gating cleared after {delay}s timeout for guild {guild_id}")
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            pass
-
-    async def _maybe_trigger_followup(self, guild_id: int, realtime_client: RealtimeClient, reason: str = "") -> bool:
-        """Safely trigger commit+response once, deduping across watchers and events."""
-        session = self.sessions.get(guild_id)
-        if not session or not realtime_client:
-            return False
-        now = time.time()
-        # Deduplicate: don't trigger while a response is active or in-flight
-        if getattr(realtime_client, '_response_active', False):
-            log.debug(f"Skip trigger ({reason}) - response already active")
-            return False
-        if session.get("response_inflight"):
-            log.debug(f"Skip trigger ({reason}) - response inflight")
-            return False
-        if now < (session.get("gate_next_allowed", 0.0) or 0.0):
-            log.debug(f"Skip trigger ({reason}) - gate cooldown active")
-            return False
-        # Mark inflight and cooldown
-        session["response_inflight"] = True
-        session["gate_next_allowed"] = now + 1.0
-        try:
-            await realtime_client.commit_audio_buffer()
-            await realtime_client.create_response()
-            log.debug(f"Triggered follow-up via {reason}")
-            # Safety: clear inflight if no response events arrive
-            asyncio.create_task(self._clear_inflight_after(guild_id, 6.0))
-            return True
-        except Exception as e:
-            log.error(f"Error triggering follow-up ({reason}): {e}")
-            session["response_inflight"] = False
-            return False
 
     async def _cleanup_session(self, guild_id: int):
         """Clean up session resources."""
@@ -1378,13 +1309,12 @@ class RealTalk(red_commands.Cog):
                     monitor_task.cancel()
                 except Exception:
                     pass
-            # Cancel wake task if present
-            wake_task = session.get("wake_task")
-            if wake_task:
-                try:
-                    wake_task.cancel()
-                except Exception:
-                    pass
+            # Clean up router state
+            if guild_id in self.routers:
+                router = self.routers[guild_id]
+                # Clean up stale threads
+                router._maybe_close_stale_threads(max_age_seconds=0)  # Close all threads
+                del self.routers[guild_id]
             # Stop voice capture
             voice_capture = session.get("voice_capture")
             if voice_capture:
@@ -1414,98 +1344,6 @@ class RealTalk(red_commands.Cog):
                 
         log.info(f"Cleaned up session for guild {guild_id}")
 
-    async def _wake_watch(self, guild_id: int):
-        """Local watcher: detects silence and runs Whisper gate to trigger responses."""
-        try:
-            session = self.sessions.get(guild_id)
-            if not session:
-                return
-            voice_capture: VoiceCapture = session.get("voice_capture")
-            realtime_client: RealtimeClient = session.get("realtime_client")
-            if not voice_capture or not realtime_client:
-                return
-            # Config
-            silence_ms = await self.config.wake_silence_ms()
-            wake_words = [w.lower() for w in (await self.config.wake_words())]
-            wake_recent_secs = await self.config.wake_recent_seconds()
-            wake_model = await self.config.wake_whisper_model()
-            wake_lang = await self.config.wake_language()
-            use_local = await self.config.wake_local()
-            local_model = await self.config.wake_local_model()
-            api_key = await self._get_openai_api_key()
-            followup_secs = await self.config.wake_followup_seconds()
-            followup_after_ai = await self.config.wake_followup_after_ai_secs()
-            
-            speaking = False
-            speech_start = 0.0
-            last_any = 0.0
-            while guild_id in self.sessions:
-                # Determine latest activity time
-                last_any = getattr(voice_capture, 'last_voice_activity_ts', 0.0) or 0.0
-                now = time.time()
-                # Consider speaking if we've seen audio in the last 300ms
-                recently_active = (now - last_any) < 0.3
-                # Transition detection
-                if recently_active and not speaking:
-                    speaking = True
-                    speech_start = now
-                    log.debug(f"WakeWatch[{guild_id}]: speech started")
-                elif speaking and (now - last_any) >= (silence_ms / 1000.0):
-                    # Speaking just stopped according to local timer → gate with Whisper
-                    speaking = False
-                    log.debug(f"WakeWatch[{guild_id}]: speech stopped; gating")
-                    try:
-                        # 0) Barge-in grace window (opened on interruption)
-                        grace_until = session.get("wake_barge_grace_until", 0.0) or 0.0
-                        if time.time() <= grace_until:
-                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-barge-grace")
-                            session["wake_barge_grace_until"] = time.time() + 1.5
-                            log.debug(f"WakeWatch[{guild_id}]: triggered via barge-in grace window")
-                            continue
-                        # Fast path: If within follow-up-after-AI window, trigger immediately without transcription
-                        fu_ai_until = session.get("wake_followup_until", 0.0) or 0.0
-                        if time.time() <= fu_ai_until:
-                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-fast-followup")
-                            log.debug(f"WakeWatch[{guild_id}]: within follow-up-after-AI window; triggered without wake")
-                            # Refresh the AI follow-up window for rapid back-and-forth
-                            session["wake_followup_until"] = time.time() + float(followup_after_ai)
-                            continue
-                        # Use only the segment since speech_start (+ small pre-roll), bounded by wake_recent_secs
-                        seg_secs = max(0.8, min(wake_recent_secs, max(0.0, now - speech_start) + 0.3))
-                        wav = voice_capture.get_recent_audio_wav(seconds=seg_secs, sample_rate=48000)
-                        if not wav:
-                            log.debug(f"WakeWatch[{guild_id}]: no audio to transcribe")
-                            continue
-                        log.debug(f"WakeWatch[{guild_id}]: transcribing ({'local' if use_local else 'api'})")
-                        transcript = await self._whisper_transcribe(api_key, wav, model=wake_model, language=wake_lang, use_local=use_local, local_model=local_model)
-                        t = (transcript or "").strip()
-                        log.debug(f"WakeWatch[{guild_id}]: transcript='{t[:80]}{'...' if len(t)>80 else ''}'")
-                        # Accept wake phrase anywhere in the utterance
-                        match = self._wake_matches(t, wake_words)
-                        log.debug(f"WakeWatch[{guild_id}]: wake match={match}")
-                        if match:
-                            # Trigger response and open a follow-up window for this speaker
-                            await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-wake-match")
-                            # Time-based follow-up window (speaker-agnostic)
-                            now_ts = time.time()
-                            session["wake_followup_expires"] = now_ts + float(followup_secs)
-                            log.debug(f"WakeWatch[{guild_id}]: follow-up window opened for {followup_secs}s")
-                        else:
-                            # If within time-based follow-up window (from prior wake), allow without wake
-                            now_ts = time.time()
-                            fu_expires = session.get("wake_followup_expires", 0.0)
-                            if now_ts <= fu_expires:
-                                await self._maybe_trigger_followup(guild_id, realtime_client, reason="watch-long-followup")
-                                # Refresh window slightly for quick back-and-forth
-                                session["wake_followup_expires"] = now_ts + float(min(followup_secs, 6))
-                                log.debug(f"WakeWatch[{guild_id}]: in follow-up window; triggered; extended briefly")
-                            else:
-                                log.debug(f"WakeWatch[{guild_id}]: no wake and not in follow-up window; ignoring")
-                    except Exception as e:
-                        log.error(f"Wake watch error: {e}")
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            return
 
     @red_commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
