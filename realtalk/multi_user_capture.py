@@ -268,6 +268,13 @@ class MultiUserVoiceCapture:
         # Audio sink for receiving per-user audio
         self.audio_sink: Optional['UserAudioSink'] = None
         
+        # Store main event loop for thread-safe audio processing
+        self.main_loop = None
+        try:
+            self.main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        
         # Stats
         self.total_users_processed = 0
         self.start_time = time.time()
@@ -458,18 +465,16 @@ class UserAudioSink(AudioSink):
             else:
                 audio_data = bytes(data)
             
-            # Forward to voice capture (async)
-            # Use asyncio.run_coroutine_threadsafe to schedule from sync context
-            try:
-                loop = asyncio.get_running_loop()
+            # Forward to voice capture (async) - thread-safe scheduling
+            main_loop = self.voice_capture.main_loop
+            if main_loop and not main_loop.is_closed():
+                # Use the stored main loop for thread-safe scheduling
                 asyncio.run_coroutine_threadsafe(
-                    self.voice_capture.on_user_audio(user, audio_data), loop
+                    self.voice_capture.on_user_audio(user, audio_data), 
+                    main_loop
                 )
-            except RuntimeError:
-                # No running loop - schedule for when loop becomes available
-                asyncio.ensure_future(
-                    self.voice_capture.on_user_audio(user, audio_data)
-                )
+            else:
+                log.warning("No main event loop available for audio processing")
             
         except Exception as e:
             log.error(f"Error in UserAudioSink.write: {e}")
