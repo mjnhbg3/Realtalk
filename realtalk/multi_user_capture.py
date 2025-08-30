@@ -14,6 +14,23 @@ import discord
 from .realtime import RealtimeClient
 from .router import ConversationRouter, Turn
 
+# Import voice_recv for AudioSink base class
+try:
+    import discord.ext.voice_recv as voice_recv
+    AudioSink = voice_recv.AudioSink
+except ImportError:
+    try:
+        import voice_recv
+        AudioSink = voice_recv.AudioSink
+    except ImportError:
+        # Fallback: create a basic AudioSink-compatible class
+        class AudioSink:
+            def write(self, user, data):
+                pass
+            
+            def cleanup(self):
+                pass
+
 try:
     import numpy as np
     HAS_NUMPY = True
@@ -408,10 +425,11 @@ class MultiUserVoiceCapture:
             raise
 
 
-class UserAudioSink:
+class UserAudioSink(AudioSink):
     """Audio sink that receives per-user audio from Discord"""
     
     def __init__(self, voice_capture: MultiUserVoiceCapture):
+        super().__init__()
         self.voice_capture = voice_capture
         self.total_packets = 0
         self.users_seen: Set[str] = set()
