@@ -679,7 +679,7 @@ class RealTalk(red_commands.Cog):
             f"Router enabled: `{router_enabled}`",
             f"Bot aliases: {', '.join(bot_aliases)}",
             f"Thresholds: addr={addr_threshold}, followup={followup_threshold}, margin={margin_threshold}",
-            f"Router debug: `{router_debug_active}`,
+            f"Router debug: `{router_debug_active}`",
             "",
             "System prompt:",
             box(prompt or "(empty)")
