@@ -109,8 +109,11 @@ class UserAudioProcessor:
             except Exception as e:
                 log.warning(f"Could not disable auto response for {self.display_name}: {e}")
             
-            # Set up transcript callback
+            # Set up callbacks for per-user client
             self.realtime_client.on_input_transcript = self._on_transcript_received
+            
+            # Set up server VAD callbacks to trigger manual commits for transcription
+            self.realtime_client.on_input_audio_buffer_speech_stopped = self._on_server_vad_speech_stopped
             
             log.info(f"Initialized realtime client for {self.display_name}")
             
@@ -126,62 +129,27 @@ class UserAudioProcessor:
         log.info(f"Cleaned up UserAudioProcessor for {self.display_name}")
     
     async def process_audio_chunk(self, audio_data: bytes):
-        """Process incoming audio chunk with local VAD"""
+        """Process incoming audio chunk - send to OpenAI for server VAD"""
         if not self.realtime_client or not audio_data:
             return
         
         self.total_audio_chunks += 1
         
         try:
-            # Calculate audio energy for VAD
-            energy = self._calculate_audio_energy(audio_data)
-            now = time.time()
+            # Simply stream audio to OpenAI - let server VAD handle speech detection
+            await self.realtime_client.send_audio(audio_data)
             
-            # VAD logic
-            voice_detected = energy > self.vad_threshold
-            
-            if voice_detected:
-                self.last_voice_time = now
-                
-                if not self.is_speaking:
-                    # Speech started
-                    self.is_speaking = True
-                    self.speech_start_time = now
-                    self.audio_buffer.clear()
-                    self.speech_segments += 1
-                    log.debug(f"User {self.display_name} started speaking (segment {self.speech_segments})")
-                
-                # Buffer audio during speech
-                self.audio_buffer.extend(audio_data)
-                
-                # Send to user's OpenAI Realtime client (streaming)
-                await self.realtime_client.send_audio(audio_data)
-                
-            elif self.is_speaking:
-                # Check for end of speech
-                silence_duration = now - self.last_voice_time
-                
-                if silence_duration > (self.silence_ms / 1000.0):
-                    # Speech ended
-                    self.is_speaking = False
-                    speech_duration = now - self.speech_start_time
-                    log.debug(f"User {self.display_name} stopped speaking "
-                             f"(duration: {speech_duration:.1f}s, buffer: {len(self.audio_buffer)} bytes)")
-                    
-                    # Commit audio buffer to get transcript (only if we have sufficient audio)
-                    if len(self.audio_buffer) > 0:
-                        # Check if we have enough audio (at least 100ms at 48kHz, 16-bit = ~9600 bytes)
-                        min_audio_bytes = int(0.1 * self.sample_rate * 2)  # 100ms at 48kHz, 16-bit
-                        if len(self.audio_buffer) >= min_audio_bytes:
-                            await self.realtime_client.commit_audio_buffer()
-                        else:
-                            log.debug(f"Skipping commit - insufficient audio: {len(self.audio_buffer)} bytes "
-                                    f"(need {min_audio_bytes})")
-                    else:
-                        log.debug("Skipping commit - empty audio buffer")
-                    
         except Exception as e:
             log.error(f"Error processing audio for {self.display_name}: {e}")
+    
+    def _on_server_vad_speech_stopped(self):
+        """Called when server VAD detects end of speech - commit buffer for transcription"""
+        try:
+            log.debug(f"Server VAD speech stopped for {self.display_name} - committing audio buffer")
+            # Create an async task to commit the audio buffer
+            asyncio.create_task(self.realtime_client.commit_audio_buffer())
+        except Exception as e:
+            log.error(f"Error committing audio buffer for {self.display_name}: {e}")
     
     def _calculate_audio_energy(self, audio_data: bytes) -> float:
         """Calculate RMS energy for VAD"""
