@@ -352,7 +352,7 @@ class ConversationRouter:
         import hashlib
         hash_val = int(hashlib.md5(text.encode()).hexdigest()[:8], 16)
         np.random.seed(hash_val % (2**31))
-        return np.randn(384)  # 384-dimensional embedding
+        return np.random.randn(384)  # 384-dimensional embedding
     
     def cosine_similarity(self, a: List[float], b: List[float]) -> float:
         """Compute cosine similarity between two vectors"""

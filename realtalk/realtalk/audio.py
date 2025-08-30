@@ -257,10 +257,9 @@ class PCMQueueAudioSource(discord.AudioSource):
             log.error(f"Error adding audio to queue: {e}")
 
     def _to_48k_stereo(self, audio_data: bytes) -> bytes:
-        """Convert 24kHz mono PCM16 to 48kHz stereo using the original working method.
+        """Convert OpenAI PCM16 to 48kHz stereo.
         
-        Reverted to original linear interpolation approach that was working.
-        The sample duplication was causing double-speed playback issues.
+        Using the exact working method from f9afcd9 commit.
         """
         try:
             if not audio_data:
@@ -270,22 +269,26 @@ class PCMQueueAudioSource(discord.AudioSource):
             mono = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
             if mono.size == 0:
                 return b""
+            
+            # Vectorized 2x linear interpolation: 24kHz → 48kHz
+            input_samples = mono.size
+            output_samples = input_samples * 2
+            # Interpolate in int16 domain to avoid float precision weirdness
+            src = mono.astype(np.int32)
+            up = np.empty(output_samples, dtype=np.int32)
+            up[0::2] = src
+            if input_samples > 1:
+                up[1:-1:2] = ((src[:-1] + src[1:]) // 2)
+                up[-1] = src[-1]
+            else:
+                up[1] = src[0]
 
-            # Revert to original linear interpolation 2x upsampling
-            # This was working before - the issue wasn't the sample rate conversion
-            up_len = mono.size * 2
-            up = np.empty(up_len, dtype=np.float32)
-            up[0::2] = mono
-            # For the inserted samples, average with previous sample; for the last sample, repeat
-            up[1:-1:2] = (mono[:-1] + mono[1:]) / 2.0
-            up[-1] = mono[-1]
-
-            # Duplicate to stereo (L=R)
-            stereo = np.column_stack((up, up)).reshape(-1)
-
-            # Cast back to int16 with clipping
-            np.clip(stereo, -32768, 32767, out=stereo)
-            return stereo.astype(np.int16).tobytes()
+            # Duplicate to stereo and interleave robustly
+            up_clipped = np.clip(up, -32768, 32767).astype(np.int16)
+            stereo = np.repeat(up_clipped[:, None], 2, axis=1).reshape(-1)
+            result = stereo.tobytes()
+            
+            return result
             
         except Exception as e:
             log.error(f"Error converting audio to 48k stereo: {e}")
