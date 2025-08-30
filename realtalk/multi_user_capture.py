@@ -85,6 +85,10 @@ class UserAudioProcessor:
             user_server_vad = self.realtime_config.get('server_vad', {}).copy()
             if user_server_vad:
                 user_server_vad['create_response'] = False  # Per-user clients should not create responses
+                log.debug(f"Per-user client config for {display_name}: create_response={user_server_vad.get('create_response')}")
+            else:
+                user_server_vad = {'create_response': False}
+                log.debug(f"Per-user client config for {display_name}: no server_vad, using create_response=False")
             
             self.realtime_client = RealtimeClient(
                 api_key=self.realtime_config['api_key'],
@@ -97,6 +101,13 @@ class UserAudioProcessor:
             
             # Connect to OpenAI
             await self.realtime_client.connect()
+            
+            # Explicitly disable response creation after connection
+            try:
+                self.realtime_client.set_auto_create_response(False)
+                log.debug(f"Disabled auto response creation for {self.display_name}")
+            except Exception as e:
+                log.warning(f"Could not disable auto response for {self.display_name}: {e}")
             
             # Set up transcript callback
             self.realtime_client.on_input_transcript = self._on_transcript_received
@@ -204,8 +215,10 @@ class UserAudioProcessor:
     
     def _on_transcript_received(self, transcript: str):
         """Handle transcript from user's OpenAI Realtime API"""
+        log.debug(f"Raw transcript received for {self.display_name}: '{transcript}'")
         transcript = transcript.strip()
         if not transcript:
+            log.debug(f"Empty transcript from {self.display_name}, skipping")
             return
         
         self.last_transcript_time = time.time()
