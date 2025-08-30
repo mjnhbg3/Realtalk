@@ -25,6 +25,9 @@ except ImportError:
     except ImportError:
         # Fallback: create a basic AudioSink-compatible class
         class AudioSink:
+            def wants_opus(self) -> bool:
+                return False
+                
             def write(self, user, data):
                 pass
             
@@ -433,6 +436,10 @@ class UserAudioSink(AudioSink):
         self.voice_capture = voice_capture
         self.total_packets = 0
         self.users_seen: Set[str] = set()
+    
+    def wants_opus(self) -> bool:
+        """Return whether we want Opus-encoded audio (False = we want PCM)"""
+        return False
     
     def write(self, user: discord.Member, data):
         """Called by discord.py for each user's audio packet"""
