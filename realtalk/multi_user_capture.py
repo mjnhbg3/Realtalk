@@ -81,12 +81,17 @@ class UserAudioProcessor:
         """Initialize the user's OpenAI Realtime connection"""
         try:
             # Create individual realtime client for this user's transcription
+            # Override server_vad to disable response creation for per-user clients
+            user_server_vad = self.realtime_config.get('server_vad', {}).copy()
+            if user_server_vad:
+                user_server_vad['create_response'] = False  # Per-user clients should not create responses
+            
             self.realtime_client = RealtimeClient(
                 api_key=self.realtime_config['api_key'],
                 model=self.realtime_config['model'],
                 voice=self.realtime_config['voice'],
                 transcribe=self.realtime_config['transcribe'],
-                server_vad=self.realtime_config.get('server_vad'),
+                server_vad=user_server_vad,
                 instructions="You are transcribing audio. Only provide transcriptions, no responses."
             )
             
@@ -283,6 +288,7 @@ class MultiUserVoiceCapture:
         # Per-user processing
         self.user_processors: Dict[str, UserAudioProcessor] = {}
         self.active_speakers: Set[str] = set()
+        self.processor_creation_lock = asyncio.Lock()  # Prevent race conditions
         
         # Audio sink for receiving per-user audio
         self.audio_sink: Optional['UserAudioSink'] = None
@@ -365,9 +371,12 @@ class MultiUserVoiceCapture:
         display_name = user.display_name or user.name
         
         try:
-            # Create processor for new users
+            # Create processor for new users (with lock to prevent race conditions)
             if user_id not in self.user_processors:
-                await self._create_user_processor(user_id, display_name)
+                async with self.processor_creation_lock:
+                    # Double-check inside the lock
+                    if user_id not in self.user_processors:
+                        await self._create_user_processor(user_id, display_name)
             
             # Update active speakers
             self.active_speakers.add(display_name)
