@@ -13,7 +13,9 @@
       "WebFetch(domain:platform.openai.com)",
       "WebFetch(domain:www.latent.space)",
       "WebFetch(domain:learn.microsoft.com)",
-      "WebFetch(domain:docs.workadventu.re)"
+      "WebFetch(domain:docs.workadventu.re)",
+      "Bash(git commit:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []
