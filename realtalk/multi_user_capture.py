@@ -398,13 +398,13 @@ class MultiUserVoiceCapture:
         }
     
     async def _setup_fallback_capture(self):
-        \"\"\"Setup fallback capture for when voice_recv is not available\"\"\"
+        """Setup fallback capture for when voice_recv is not available"""
         try:
             # Create a single processor for mixed audio with generic user
-            await self._create_user_processor(\"mixed_audio\", \"MixedAudio\")
-            log.info(\"Fallback capture initialized with mixed audio processor\")
+            await self._create_user_processor("mixed_audio", "MixedAudio")
+            log.info("Fallback capture initialized with mixed audio processor")
         except Exception as e:
-            log.error(f\"Failed to setup fallback capture: {e}\")
+            log.error(f"Failed to setup fallback capture: {e}")
             raise
 
 
