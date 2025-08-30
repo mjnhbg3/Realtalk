@@ -836,7 +836,13 @@ class RealTalk(red_commands.Cog):
                     
                     # Create fresh audio source if needed (new response)
                     if current_audio_source is None:
-                        current_audio_source = PCMQueueAudioSource()
+                        # Try using PCMQueueAudioSource for now (simplified from working RateLimitedAudioSource)
+                        current_audio_source = PCMQueueAudioSource(
+                            sample_rate=48000,
+                            channels=2, 
+                            frame_size=960,
+                            max_queue_size=10  # Smaller queue like working version
+                        )
                         self.sessions[guild_id]["current_audio_source"] = current_audio_source
                         log.debug("Created fresh audio source for new response")
                     
