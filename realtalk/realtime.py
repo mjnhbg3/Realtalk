@@ -90,7 +90,7 @@ class RealtimeClient:
                 "threshold": (server_vad or {}).get("threshold", 0.5),
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": (server_vad or {}).get("silence_ms", 300),
-                "create_response": True
+                "create_response": (server_vad or {}).get("create_response", True)
             },
             "tools": [],
             "tool_choice": "auto",
