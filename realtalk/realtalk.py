@@ -1064,6 +1064,38 @@ class RealTalk(red_commands.Cog):
                 instructions=await self.config.system_prompt(),
             )
             
+            # Initialize conversation router for this guild first (needed by voice capture)
+            router_enabled = await self.config.router_enabled()
+            if router_enabled:
+                if guild_id not in self.routers:
+                    self.routers[guild_id] = ConversationRouter(main_realtime_client=realtime_client)
+                
+                router = self.routers[guild_id]
+                
+                # Update router configuration
+                router.update_thresholds(
+                    addr_threshold=await self.config.addr_threshold(),
+                    followup_threshold=await self.config.followup_threshold(),
+                    margin_threshold=await self.config.margin_threshold()
+                )
+                
+                # Set bot aliases for addressing detection
+                bot_aliases = await self.config.bot_aliases()
+                router.feature_extractor.bot_aliases = bot_aliases
+                
+                # Configure realtime client for routing
+                try:
+                    # Main client handles bot responses only, not transcription
+                    realtime_client.set_auto_create_response(False)
+                except Exception:
+                    pass
+                
+                log.info("Conversation router initialized and configured")
+            else:
+                # Create dummy router for compatibility
+                router = ConversationRouter(main_realtime_client=realtime_client)
+                log.info("Router disabled - created dummy router for compatibility")
+            
             # Initialize multi-user voice capture system
             realtime_config = {
                 'api_key': api_key,
@@ -1098,36 +1130,7 @@ class RealTalk(red_commands.Cog):
             # Connect to OpenAI Realtime API
             await realtime_client.connect()
 
-            # Conversation routing system
-            router_enabled = await self.config.router_enabled()
-            if router_enabled:
-                # Initialize conversation router for this guild
-                if guild_id not in self.routers:
-                    self.routers[guild_id] = ConversationRouter(main_realtime_client=realtime_client)
-                
-                router = self.routers[guild_id]
-                
-                # Update router configuration
-                router.update_thresholds(
-                    addr_threshold=await self.config.addr_threshold(),
-                    followup_threshold=await self.config.followup_threshold(),
-                    margin_threshold=await self.config.margin_threshold()
-                )
-                
-                # Set bot aliases for addressing detection
-                bot_aliases = await self.config.bot_aliases()
-                router.feature_extractor.bot_aliases = bot_aliases
-                
-                # Configure realtime client for routing
-                try:
-                    # Main client handles bot responses only, not transcription
-                    realtime_client.set_auto_create_response(False)
-                except Exception:
-                    pass
-                
-                # Transcript handling is now done by individual user processors
-                # in the MultiUserVoiceCapture system - no need for central handler
-                log.info("Routing enabled - transcripts handled by per-user processors")
+            # Router was already initialized above before voice capture creation
             
             # Audio playback completion callback
             def _audio_finished(error):
