@@ -459,9 +459,17 @@ class UserAudioSink(AudioSink):
                 audio_data = bytes(data)
             
             # Forward to voice capture (async)
-            asyncio.create_task(
-                self.voice_capture.on_user_audio(user, audio_data)
-            )
+            # Use asyncio.run_coroutine_threadsafe to schedule from sync context
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.run_coroutine_threadsafe(
+                    self.voice_capture.on_user_audio(user, audio_data), loop
+                )
+            except RuntimeError:
+                # No running loop - schedule for when loop becomes available
+                asyncio.ensure_future(
+                    self.voice_capture.on_user_audio(user, audio_data)
+                )
             
         except Exception as e:
             log.error(f"Error in UserAudioSink.write: {e}")
