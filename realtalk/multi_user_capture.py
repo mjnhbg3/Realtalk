@@ -85,10 +85,10 @@ class UserAudioProcessor:
             user_server_vad = self.realtime_config.get('server_vad', {}).copy()
             if user_server_vad:
                 user_server_vad['create_response'] = False  # Per-user clients should not create responses
-                log.debug(f"Per-user client config for {display_name}: create_response={user_server_vad.get('create_response')}")
+                log.debug(f"Per-user client config for {self.display_name}: create_response={user_server_vad.get('create_response')}")
             else:
                 user_server_vad = {'create_response': False}
-                log.debug(f"Per-user client config for {display_name}: no server_vad, using create_response=False")
+                log.debug(f"Per-user client config for {self.display_name}: no server_vad, using create_response=False")
             
             self.realtime_client = RealtimeClient(
                 api_key=self.realtime_config['api_key'],
