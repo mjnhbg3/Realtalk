@@ -594,9 +594,14 @@ class ConversationRouter:
                 if thread.expects_reply and time.time() > thread.expects_reply['until']:
                     thread.expects_reply = None
             
-            asyncio.create_task(asyncio.sleep(9.0)).add_done_callback(
-                lambda _: clear_expectations()
-            )
+            # Schedule expectation clearing (only if event loop is running)
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(asyncio.sleep(9.0))
+                task.add_done_callback(lambda _: clear_expectations())
+            except RuntimeError:
+                # No running loop - skip expectation clearing in test mode
+                pass
     
     def _get_thread_by_id(self, thread_id: str) -> Optional[Thread]:
         """Get thread by ID"""

@@ -32,6 +32,7 @@ def test_feature_extraction():
     for text, description in test_cases:
         turn = Turn(
             user_id="test_user",
+            display_name="TestUser",
             text=text,
             confidence=1.0,
             timestamp=time.time()
@@ -67,6 +68,7 @@ def test_routing_decisions():
     for text, expected_action, description in test_cases:
         turn = Turn(
             user_id="test_user",
+            display_name="TestUser",
             text=text,
             confidence=1.0,
             timestamp=time.time()
@@ -77,7 +79,7 @@ def test_routing_decisions():
         reason = decision.get("reason", "unknown")
         score = decision.get("score", 0)
         
-        status = "✅" if action == expected_action else "❌"
+        status = "[PASS]" if action == expected_action else "[FAIL]"
         print(f"\n{status} '{text}' ({description})")
         print(f"    Expected: {expected_action}, Got: {action} ({reason}, score={score:.2f})")
         
@@ -94,6 +96,7 @@ def test_thread_management():
     print("1. Starting conversation with bot")
     turn1 = Turn(
         user_id="user1",
+        display_name="User1",
         text="dukebot, how do I deploy this application?",
         confidence=1.0,
         timestamp=time.time()
@@ -113,7 +116,8 @@ def test_thread_management():
         # Test follow-up
         print("\n2. Testing follow-up response")
         turn2 = Turn(
-            user_id="user1", 
+            user_id="user1",
+            display_name="User1", 
             text="docker please",
             confidence=1.0,
             timestamp=time.time() + 1
@@ -126,6 +130,7 @@ def test_thread_management():
         print("\n3. Testing off-topic interruption")
         turn3 = Turn(
             user_id="user2",
+            display_name="User2",
             text="hey anyone want to queue for ranked?",
             confidence=1.0,
             timestamp=time.time() + 2
@@ -138,6 +143,7 @@ def test_thread_management():
         print("\n4. Testing different user following up")
         turn4 = Turn(
             user_id="user3",
+            display_name="User3",
             text="what about using kubernetes instead?",
             confidence=1.0,
             timestamp=time.time() + 3
@@ -163,6 +169,7 @@ def test_threshold_tuning():
     
     turn = Turn(
         user_id="test_user",
+        display_name="TestUser",
         text=test_text,
         confidence=1.0,
         timestamp=time.time()
@@ -198,7 +205,7 @@ def main():
         print("All tests completed! Check output above for any issues.")
         
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\n[ERROR] Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         return 1

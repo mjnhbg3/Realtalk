@@ -20,6 +20,7 @@ def test_basic_functionality():
     # Test 1: Direct addressing
     turn1 = Turn(
         user_id="user1",
+        display_name="User1",
         text="dukebot help me",
         confidence=1.0,
         timestamp=time.time()
@@ -30,7 +31,8 @@ def test_basic_functionality():
     
     # Test 2: Human addressing
     turn2 = Turn(
-        user_id="user1", 
+        user_id="user1",
+        display_name="User1", 
         text="Maya can you help?",
         confidence=1.0,
         timestamp=time.time()
@@ -42,6 +44,7 @@ def test_basic_functionality():
     # Test 3: Gaming chatter
     turn3 = Turn(
         user_id="user1",
+        display_name="User1",
         text="gg nice game",
         confidence=1.0,
         timestamp=time.time()
@@ -59,6 +62,7 @@ def test_feature_extraction():
     
     turn = Turn(
         user_id="test",
+        display_name="TestUser",
         text="hey dukebot can you help?",
         confidence=1.0,
         timestamp=time.time()
