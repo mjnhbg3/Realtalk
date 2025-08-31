@@ -772,9 +772,12 @@ class RealTalk(red_commands.Cog):
             
             # Initialize conversation router with stricter thresholds
             router = ConversationRouter()
-            router.update_thresholds(0.7, 0.6, 0.25)  # More restrictive
-            log.info("Updated thresholds - addr: 0.70, followup: 0.60, margin: 0.25")
+            router.update_thresholds(0.8, 0.7, 0.3)  # Even more restrictive to prevent false positives
+            log.info("Updated thresholds - addr: 0.80, followup: 0.70, margin: 0.30 (stricter)")
             log.info("Conversation router initialized and configured")
+            
+            # Track pending response state for manual triggering
+            pending_response = {"should_respond": False, "transcript": "", "decision": None}
             
             # Initialize voice capture
             voice_capture = VoiceCapture(
@@ -950,15 +953,18 @@ class RealTalk(red_commands.Cog):
                     log.debug(f"Router decision: {action} ({reason}, score={score:.2f}) for '{transcript}'")
                     
                     if action == "ignore":
-                        log.debug(f"Ignoring user input: '{transcript}' - {reason}")
+                        log.info(f"ROUTER IGNORE: '{transcript}' - {reason} (score={score:.2f})")
+                        # Clean up old threads to prevent false followup detection
+                        router._maybe_close_stale_threads(max_age_seconds=30.0)  # Shorter cleanup window
                         # Cancel any potential response generation
                         try:
                             if realtime_client._response_active:
                                 asyncio.create_task(realtime_client.cancel_response())
+                                log.debug("Cancelled ongoing response due to router ignore decision")
                         except Exception:
                             pass
                     elif action == "speak":
-                        log.debug(f"Allowing response for: '{transcript}' - {reason}")
+                        log.info(f"ROUTER ALLOW: '{transcript}' - {reason} (score={score:.2f})")
                         # Let the normal flow continue (response already triggered)
                         if decision.get("thread_id"):
                             router.on_bot_reply(decision["thread_id"], "Processing...", "thinking")
