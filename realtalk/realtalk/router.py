@@ -407,9 +407,14 @@ class ConversationRouter:
         recency = self.decay_function(elapsed)
         score += recency * weights['recency_decay']
         
-        # Participant bonus
+        # Participant bonus - but be very restrictive for single-word responses
         if turn.user_id in thread.participants:
             score += weights['participant_bonus']
+        else:
+            # Different user - heavily penalize casual single-word responses
+            words = turn.text.strip().lower().split()
+            if len(words) <= 2 and any(word in ['yeah', 'yes', 'ok', 'okay', 'sure', 'yep', 'no', 'nope'] for word in words):
+                score -= 0.5  # Heavy penalty for casual responses from different users
         
         # Expects reply bonus
         if thread.expects_reply and now < thread.expects_reply.get('until', 0):
@@ -498,8 +503,10 @@ class ConversationRouter:
         best_key = max(valid_scores.keys(), key=lambda k: valid_scores[k])
         best_score = valid_scores[best_key]
         
-        # Decision logic
-        if best_key == 'addr_bot' and best_score > self.addr_threshold:
+        # Decision logic with priority for strong bot addressing
+        # If there's a clear bot alias mention, prioritize direct addressing over followup
+        if (best_key == 'addr_bot' and best_score > self.addr_threshold) or \
+           (features.get('bot_alias', 0) >= 1.0 and scores.get('addr_bot', 0) > 0.7):
             # Start new thread
             thread = self._spawn_thread(turn)
             return {

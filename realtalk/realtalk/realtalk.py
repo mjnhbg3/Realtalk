@@ -772,8 +772,8 @@ class RealTalk(red_commands.Cog):
             
             # Initialize conversation router with stricter thresholds
             router = ConversationRouter()
-            router.update_thresholds(0.8, 0.7, 0.3)  # Even more restrictive to prevent false positives
-            log.info("Updated thresholds - addr: 0.80, followup: 0.70, margin: 0.30 (stricter)")
+            router.update_thresholds(0.75, 0.8, 0.3)  # Lower addr threshold to allow "bot what time is it", higher followup to prevent casual "yeah"
+            log.info("Updated thresholds - addr: 0.75, followup: 0.80, margin: 0.30")
             log.info("Conversation router initialized and configured")
             
             # Track pending response state for manual triggering
