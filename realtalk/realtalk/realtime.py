@@ -273,6 +273,33 @@ class RealtimeClient:
                 log.debug("Response cancellation sent to OpenAI")
         except Exception as e:
             log.error(f"Error canceling response: {e}")
+    
+    async def send_text_message(self, text: str, user_label: str = None):
+        """Send a text message to the conversation context."""
+        if not self.session_active:
+            return
+            
+        try:
+            # Format with user label if provided
+            formatted_text = f"{user_label}: {text}" if user_label else text
+            
+            # Create conversation item with the text
+            await self._send_message({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": formatted_text
+                        }
+                    ]
+                }
+            })
+            log.debug(f"Sent text message to conversation: '{formatted_text}'")
+        except Exception as e:
+            log.error(f"Error sending text message: {e}")
 
     async def _initialize_session(self):
         """Initialize the session with optimized settings."""

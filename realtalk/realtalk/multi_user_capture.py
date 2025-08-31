@@ -228,8 +228,8 @@ class UserAudioProcessor:
                 log.warning("No transcript text available for bot response")
                 return
             
-            # Send the transcript as a text message to the main realtime client
-            await self.main_realtime_client.send_text_message(turn.text)
+            # Send the transcript as a text message to the main realtime client with user label
+            await self.main_realtime_client.send_text_message(turn.text, self.display_name)
             
             # Create response from the text input
             await self.main_realtime_client.create_response()
