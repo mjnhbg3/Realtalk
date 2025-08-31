@@ -20,6 +20,7 @@ from redbot.core.utils.chat_formatting import box, humanize_list
 from .realtime import RealtimeClient
 from .router import ConversationRouter, Turn
 from .capture import VoiceCapture
+from .multi_user_capture import MultiUserVoiceCapture
 from .audio import PCMQueueAudioSource, load_opus_lib
 from .audio_ratelimited import RateLimitedAudioSource
 
@@ -779,31 +780,24 @@ class RealTalk(red_commands.Cog):
             # Track pending response state for manual triggering
             pending_response = {"should_respond": False, "transcript": "", "decision": None}
             
-            # Initialize voice capture
-            voice_capture = VoiceCapture(
+            # Prepare realtime config for multi-user system
+            realtime_config = {
+                'api_key': api_key,
+                'model': model_name,
+                'voice': voice_name,
+                'transcribe': transcribe_model,
+                'server_vad': server_vad
+            }
+            
+            # Initialize multi-user voice capture (per-user transcription)
+            voice_capture = MultiUserVoiceCapture(
                 voice_client=voice_client,
-                realtime_client=realtime_client,
-                audio_threshold=await self.config.audio_threshold(),
-                silence_threshold=await self.config.silence_threshold()
+                router=router,
+                realtime_config=realtime_config,
+                main_realtime_client=realtime_client
             )
-            # Apply noise mode and mixing
-            try:
-                noise_mode = await self.config.noise_mode()
-                if noise_mode == "none":
-                    voice_capture.set_noise_gate(False)
-                elif noise_mode == "near":
-                    voice_capture.set_noise_gate(True)
-                    voice_capture.noise_floor_adaptation_rate = 0.002
-                elif noise_mode == "far":
-                    voice_capture.set_noise_gate(True)
-                    voice_capture.noise_floor_adaptation_rate = 0.0005
-            except Exception:
-                pass
-            try:
-                mix_enabled = await self.config.mix_multiple()
-                voice_capture.set_speaker_mixing(bool(mix_enabled))
-            except Exception:
-                pass
+            # Note: Multi-user capture handles audio processing per-user
+            # Old noise/mixing configuration is not needed
             
             # Initialize current audio source reference (will be created fresh per response)
             current_audio_source = None
@@ -929,50 +923,8 @@ class RealTalk(red_commands.Cog):
                 except Exception:
                     pass
             
-            # Handle input transcription and routing
-            def _on_input_transcript(transcript: str):
-                try:
-                    if not transcript.strip():
-                        return
-                        
-                    # Create a Turn for the router
-                    turn = Turn(
-                        user_id="discord_user",  # Could be enhanced with actual user ID
-                        display_name="DiscordUser",
-                        text=transcript.strip(),
-                        confidence=1.0,
-                        timestamp=time.time()
-                    )
-                    
-                    # Route the conversation
-                    decision = router.route_turn(turn)
-                    action = decision.get("action", "ignore")
-                    reason = decision.get("reason", "unknown")
-                    score = decision.get("score", 0.0)
-                    
-                    log.debug(f"Router decision: {action} ({reason}, score={score:.2f}) for '{transcript}'")
-                    
-                    if action == "ignore":
-                        log.info(f"ROUTER IGNORE: '{transcript}' - {reason} (score={score:.2f})")
-                        # Clean up old threads to prevent false followup detection
-                        router._maybe_close_stale_threads(max_age_seconds=30.0)  # Shorter cleanup window
-                        # Cancel any potential response generation
-                        try:
-                            if realtime_client._response_active:
-                                asyncio.create_task(realtime_client.cancel_response())
-                                log.debug("Cancelled ongoing response due to router ignore decision")
-                        except Exception:
-                            pass
-                    elif action == "speak":
-                        log.info(f"ROUTER ALLOW: '{transcript}' - {reason} (score={score:.2f})")
-                        # Let the normal flow continue (response already triggered)
-                        if decision.get("thread_id"):
-                            router.on_bot_reply(decision["thread_id"], "Processing...", "thinking")
-                            
-                except Exception as e:
-                    log.error(f"Error processing transcript: {e}")
-            
-            realtime_client.on_input_audio_transcript = _on_input_transcript
+            # Multi-user capture handles transcription and routing internally
+            # No need for separate transcript handling here
             realtime_client.on_input_audio_buffer_speech_started = _on_speech_started
             realtime_client.on_input_audio_buffer_speech_stopped = _on_speech_stopped
             realtime_client.on_response_started = _on_resp_start
